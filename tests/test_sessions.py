@@ -23,14 +23,14 @@ def test_default_groups_one_session_per_day(fixture_csv):
     assert len(sessions[0].ascents) == 5
 
 
-def test_gap_hours_splits_day(fixture_csv):
-    # On 2026-09-20 the last climb (23:20) is >3h after the previous (19:45).
-    sessions = group_sessions(load_csv(fixture_csv), gap_hours=3)
-    assert len(sessions) == 4
+def test_all_same_day_ascents_form_one_session(fixture_csv):
+    # The 2026-09-20 climbs span 18:05 to 23:20 (>5h) but must stay one session.
+    sessions = group_sessions(load_csv(fixture_csv))
     day20 = [s for s in sessions if s.day == date(2026, 9, 20)]
-    assert len(day20) == 2
-    assert len(day20[0].ascents) == 4
-    assert len(day20[1].ascents) == 1
+    assert len(day20) == 1
+    assert len(day20[0].ascents) == 5
+    # Duration is first->last ascent that day.
+    assert day20[0].duration == timedelta(hours=5, minutes=15)
 
 
 def test_since_filter(fixture_csv):

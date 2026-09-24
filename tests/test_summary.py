@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 
 from kilter_garmin_sync.sessions import group_sessions
-from kilter_garmin_sync.summary import session_notes, session_title
+from kilter_garmin_sync.summary import (
+    grade_histogram,
+    hardest_grade,
+    session_notes,
+    session_title,
+)
 
 from conftest import make_ascent
 
@@ -34,6 +39,8 @@ def test_title_has_counts_angles_grades():
     assert "40\u00b0" in title and "45\u00b0" in title
     # Grade range spans V4..V7.
     assert "V4\u2013V7" in title
+    # Hardest send is V7 (the attempt is V6).
+    assert "hardest V7" in title
 
 
 def test_notes_lists_sends_and_attempts():
@@ -45,6 +52,29 @@ def test_notes_lists_sends_and_attempts():
     assert "Charlie" in notes
     assert "3 tries" in notes
     assert "kilter-garmin-sync" in notes
+
+
+def test_notes_has_grade_histogram_and_duration():
+    ascents = [
+        make_ascent(climb_name="A", when=datetime(2026, 3, 1, 9, 0), grade="V4"),
+        make_ascent(climb_name="B", when=datetime(2026, 3, 1, 9, 30), grade="V4"),
+        make_ascent(climb_name="C", when=datetime(2026, 3, 1, 10, 30), grade="V8"),
+    ]
+    notes = session_notes(group_sessions(ascents)[0])
+    assert "Hardest send: V8" in notes
+    # Per-grade send counts, hardest first.
+    assert "Sends by grade: V8\u00d71, V4\u00d72" in notes
+    # Duration first->last = 1h30m.
+    assert "1h 30m" in notes
+
+
+def test_grade_helpers_are_numeric_aware():
+    ascents = [
+        make_ascent(climb_name="A", when=datetime(2026, 3, 1, 9, 0), grade="V9"),
+        make_ascent(climb_name="B", when=datetime(2026, 3, 1, 9, 30), grade="V10"),
+    ]
+    assert hardest_grade(ascents) == "V10"
+    assert grade_histogram(ascents) == [("V10", 1), ("V9", 1)]
 
 
 def test_grade_range_orders_double_digits():

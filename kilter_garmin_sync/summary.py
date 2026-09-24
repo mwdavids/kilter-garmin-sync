@@ -30,6 +30,36 @@ def _grade_range(ascents: list[Ascent]) -> str | None:
     return f"{ordered[0]}\u2013{ordered[-1]}"  # en dash
 
 
+def hardest_grade(ascents: list[Ascent]) -> str | None:
+    """The hardest grade among the given ascents (numeric-aware)."""
+    grades = [a.grade for a in ascents if a.grade]
+    if not grades:
+        return None
+    return max(grades, key=_grade_sort_key)
+
+
+def grade_histogram(ascents: list[Ascent]) -> list[tuple[str, int]]:
+    """Count of ascents per grade, ordered hardest-first."""
+    counts: dict[str, int] = {}
+    for ascent in ascents:
+        if ascent.grade:
+            counts[ascent.grade] = counts.get(ascent.grade, 0) + 1
+    return sorted(counts.items(), key=lambda kv: _grade_sort_key(kv[0]), reverse=True)
+
+
+def _histogram_text(ascents: list[Ascent]) -> str | None:
+    hist = grade_histogram(ascents)
+    if not hist:
+        return None
+    return ", ".join(f"{grade}\u00d7{count}" for grade, count in hist)
+
+
+def _duration_text(session: Session) -> str:
+    total_minutes = int(round(session.duration.total_seconds() / 60))
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
+
+
 def _angles_text(session: Session) -> str | None:
     angles = session.angles
     if not angles:
@@ -51,7 +81,9 @@ def _counts_text(session: Session) -> str:
 
 
 def session_title(session: Session) -> str:
-    """A one-line title, e.g. ``Kilter Board - 5 climbs (4 sends, 1 attempt), 40 deg, V4-V7``."""
+    """A one-line title, e.g.
+    ``Kilter Board - 5 climbs (4 sends, 1 attempt), 40 deg, V4-V8, hardest V8``.
+    """
     parts = [f"Kilter Board \u2014 {_counts_text(session)}"]
     angles = _angles_text(session)
     if angles:
@@ -59,6 +91,9 @@ def session_title(session: Session) -> str:
     grades = _grade_range(session.ascents)
     if grades:
         parts.append(grades)
+    hardest = hardest_grade(session.sends) or hardest_grade(session.ascents)
+    if hardest:
+        parts.append(f"hardest {hardest}")
     return ", ".join(parts)
 
 
@@ -83,15 +118,23 @@ def _entry_line(ascent: Ascent) -> str:
 
 def session_notes(session: Session) -> str:
     """A multi-line description suitable for a TCX ``<Notes>`` field."""
+    sends = session.sends
+    attempts = session.attempts
+
     lines = [
         session_title(session),
         f"Date: {session.start:%Y-%m-%d}",
-        f"Time: {session.start:%H:%M}\u2013{session.end:%H:%M}",
-        "",
+        f"Time: {session.start:%H:%M}\u2013{session.end:%H:%M} ({_duration_text(session)})",
     ]
 
-    sends = session.sends
-    attempts = session.attempts
+    hardest = hardest_grade(sends)
+    if hardest:
+        lines.append(f"Hardest send: {hardest}")
+    histogram = _histogram_text(sends)
+    if histogram:
+        lines.append(f"Sends by grade: {histogram}")
+    lines.append("")
+
     if sends:
         lines.append("Sends:")
         lines.extend(f"- {_entry_line(a)}" for a in sends)

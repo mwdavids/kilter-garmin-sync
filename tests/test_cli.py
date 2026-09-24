@@ -25,17 +25,17 @@ def test_cli_generates_fit_files(tmp_path, fixture_csv, capsys):
         assert errors == []
 
 
-def test_cli_tcx_and_gap_split_filenames(tmp_path, fixture_csv):
+def test_cli_tcx_one_file_per_day(tmp_path, fixture_csv):
     out = tmp_path / "out"
-    rc = main(
-        ["--from-csv", str(fixture_csv), "--out", str(out), "--format", "tcx", "--gap-hours", "3"]
-    )
+    rc = main(["--from-csv", str(fixture_csv), "--out", str(out), "--format", "tcx"])
     assert rc == 0
     names = sorted(p.name for p in out.glob("*.tcx"))
-    # The 2026-09-20 day splits into two sessions -> time-suffixed filenames.
-    assert "kilter-2026-09-20-1805.tcx" in names
-    assert "kilter-2026-09-20-2320.tcx" in names
-    assert len(names) == 4
+    # Strictly one file per calendar day; no time-suffixed splits.
+    assert names == [
+        "kilter-2026-09-20.tcx",
+        "kilter-2026-09-23.tcx",
+        "kilter-2026-09-25.tcx",
+    ]
     for path in out.glob("*.tcx"):
         ET.parse(path)  # must be well-formed
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
@@ -91,13 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     grouping = parser.add_argument_group("session grouping")
     grouping.add_argument(
-        "--gap-hours",
-        type=float,
-        default=None,
-        metavar="H",
-        help="Split a day into multiple sessions when the idle gap exceeds H hours (default: off, one session per day).",
-    )
-    grouping.add_argument(
         "--min-duration",
         type=float,
         default=10.0,
@@ -121,14 +113,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _assign_filenames(sessions: list[Session], ext: str) -> dict[int, str]:
-    """Map session index -> filename, disambiguating multiple sessions per day."""
-    day_counts = Counter(s.day for s in sessions)
+    """Map session index -> filename.
+
+    Grouping guarantees one session per calendar day, so a date-based name is
+    unique. A numeric suffix is added only as a defensive guard against any
+    collision.
+    """
     names: dict[int, str] = {}
+    used: set[str] = set()
     for i, s in enumerate(sessions):
         base = f"kilter-{s.day:%Y-%m-%d}"
-        if day_counts[s.day] > 1:
-            base += f"-{s.start:%H%M}"
-        names[i] = f"{base}.{ext}"
+        candidate = f"{base}.{ext}"
+        n = 2
+        while candidate in used:
+            candidate = f"{base}-{n}.{ext}"
+            n += 1
+        used.add(candidate)
+        names[i] = candidate
     return names
 
 
@@ -166,7 +167,6 @@ def main(argv: list[str] | None = None) -> int:
 
     sessions = group_sessions(
         ascents,
-        gap_hours=args.gap_hours,
         min_duration_minutes=args.min_duration,
         ascents_only=args.ascents_only,
         since=args.since,

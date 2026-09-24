@@ -5,10 +5,10 @@ activity files** — one file per climbing session — so you can manually impor
 your board sessions into Garmin Connect.
 
 - Fetches your ascents/attempts via [BoardLib](https://github.com/lemeryfertitta/BoardLib).
-- Groups them into sessions (per day, optionally split on idle gaps).
+- Groups them into **one activity per calendar day**.
 - Writes one activity file per session to `./out`.
-- **FIT** output uses Garmin's native climbing activity type; **TCX** output
-  embeds a readable climb summary in the activity notes.
+- **FIT** output (default) imports as a native **Bouldering** activity; **TCX**
+  output embeds a readable climb summary in the activity notes.
 - No auto-upload — you import the files yourself.
 
 There is **no heart-rate, calorie, or GPS data** on a board session; that's
@@ -59,8 +59,8 @@ kilter-garmin-sync --username you@example.com
 # Generate TCX instead (summary shows up in Garmin Connect's activity notes)
 kilter-garmin-sync --format tcx
 
-# Only sessions on/after a date; split a day into multiple sessions on 3h gaps
-kilter-garmin-sync --since 2026-09-01 --gap-hours 3
+# Only sessions on/after a date
+kilter-garmin-sync --since 2026-09-01
 
 # Offline / no credentials: use a logbook CSV you already exported with BoardLib
 kilter-garmin-sync --from-csv logbook.csv --format tcx
@@ -91,18 +91,22 @@ testing.
 | `--format`        | `fit`           | `fit` (native climbing type) or `tcx` (summary in notes, sport "Other"). |
 | `--sub-sport`     | `bouldering`    | FIT climbing sub-sport: `bouldering` or `indoor_climbing`.               |
 | `--since`         | —               | Only export sessions on/after `YYYY-MM-DD`.                               |
-| `--gap-hours`     | off             | Split a day into multiple sessions when the idle gap exceeds this.        |
 | `--min-duration`  | `10`            | Minimum session length in minutes (short sessions are padded).           |
 | `--ascents-only`  | off             | Exclude attempt-only entries (keep only sends).                          |
 | `--overwrite`     | off             | Regenerate files even if they already exist.                             |
 | `--dry-run`       | off             | List sessions and target files without writing.                          |
 
+### Session grouping
+
+**One activity per calendar day** (your local date): every ascent logged on the
+same day goes into a single session. The session's duration is first→last ascent
+that day (padded to `--min-duration` when a day has a single ascent).
+
 ### Incremental use
 
 Re-running is cheap: sessions whose output file already exists are **skipped**
 unless you pass `--overwrite`. Combine with `--since` to only look at recent
-dates. Filenames are `kilter-YYYY-MM-DD.<ext>`, with a `-HHMM` start-time suffix
-when a single day contains multiple sessions (via `--gap-hours`).
+dates. Filenames are `kilter-YYYY-MM-DD.<ext>`.
 
 ## Importing into Garmin Connect
 
@@ -115,12 +119,14 @@ Garmin Connect (web) can import activity files manually:
 
 Notes on what you'll see:
 
-- **FIT files** import as **Bouldering** / **Indoor Climbing** (the native
-  climbing activity type). Garmin Connect does not display a free-text summary
-  from a FIT file, so the climb list lives only in the filename — rename the
-  activity afterward if you want.
-- **TCX files** import as sport **Other**, but the full climb summary (names,
-  grades, angles, sends/attempts) appears in the activity's **Notes/Comments**.
+- **FIT files** import as a **Bouldering** activity (the native climbing type),
+  with the correct **duration**. Garmin Connect does not display free text from
+  a FIT file, so the climb summary (grades, names, angles) lives only in the
+  **filename** — rename the activity afterward if you want.
+- **TCX files** import as sport **Other**, but the full climb summary appears in
+  the activity's **Notes/Comments**: climb names, angles, per-climb grades,
+  sends vs attempts, the **hardest send**, and a **per-grade send count**
+  (e.g. `V8×1, V6×1, V4×1`), plus the time window and duration.
 - Either way there is **no heart rate, calories, or distance** — board sessions
   don't record them.
 
@@ -159,7 +165,7 @@ kilter_garmin_sync/
   cli.py              CLI + orchestration
   boardlib_source.py  fetch via BoardLib / load logbook CSV -> Ascent[]
   models.py           Ascent and Session data models
-  sessions.py         group ascents into sessions (by day / gap)
+  sessions.py         group ascents into one session per calendar day
   summary.py          human-readable title + notes
   fit_writer.py       FIT generation (fit-tool)
   tcx_writer.py       TCX generation
