@@ -1,0 +1,68 @@
+name: Export Kilter activities
+
+# Runs the exporter on a GitHub-hosted runner, which can reach kilterboardapp.com
+# even when your local corporate network (e.g. Microsoft Global Secure Access)
+# TLS-blocks it. The generated .fit/.tcx files are published as a build artifact
+# for you to download and import into Garmin Connect manually.
+
+on:
+  workflow_dispatch:
+    inputs:
+      format:
+        description: Output file format
+        type: choice
+        options:
+          - fit
+          - tcx
+        default: fit
+      since:
+        description: "Only export sessions on or after this date (YYYY-MM-DD, optional)"
+        type: string
+        required: false
+        default: ""
+      sub_sport:
+        description: FIT climbing sub-sport (ignored for TCX)
+        type: choice
+        options:
+          - bouldering
+          - indoor_climbing
+        default: bouldering
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install .
+
+      - name: Export sessions
+        env:
+          KILTER_USERNAME: ${{ secrets.KILTER_USERNAME }}
+          KILTER_PASSWORD: ${{ secrets.KILTER_PASSWORD }}
+        run: |
+          args=(--format "${{ inputs.format }}" --sub-sport "${{ inputs.sub_sport }}" --out out)
+          if [ -n "${{ inputs.since }}" ]; then
+            args+=(--since "${{ inputs.since }}")
+          fi
+          kilter-garmin-sync "${args[@]}" --verbose
+
+      - name: Upload activity files
+        uses: actions/upload-artifact@v4
+        with:
+          name: kilter-activities
+          path: out/**
+          if-no-files-found: warn

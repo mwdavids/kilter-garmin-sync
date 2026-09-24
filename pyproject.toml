@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kilter-garmin-sync"
+version = "0.1.0"
+description = "Export Kilter Board climbing sessions into Garmin-importable activity files (FIT/TCX)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "boardlib>=0.9",
+    "fit-tool>=0.9.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "garmin-fit-sdk>=21.115",
+]
+
+[project.scripts]
+kilter-garmin-sync = "kilter_garmin_sync.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kilter_garmin_sync*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
