@@ -1,4 +1,10 @@
-"""Tests for FIT generation: build a file and parse it back with the Garmin SDK."""
+"""Tests for FIT generation: build a file and parse it back with the Garmin SDK.
+
+The generator reproduces the proven-importable Garmin watch envelope, so these
+tests decode the file and assert the structure Garmin's importer needs: a Garmin
+``file_id`` + ``file_creator``, exactly one session-spanning lap, and one
+``split`` per climb carrying its V-grade (and no ``climb_send`` field 73).
+"""
 
 from __future__ import annotations
 
@@ -24,13 +30,36 @@ def _session(start=datetime(2026, 3, 1, 9, 0), end=datetime(2026, 3, 1, 10, 0)):
     )[0]
 
 
+def _multi_climb_session():
+    ascents = [
+        make_ascent(when=datetime(2026, 3, 1, 9, 0), grade="V4"),
+        make_ascent(when=datetime(2026, 3, 1, 9, 30), grade="V5"),
+        make_ascent(when=datetime(2026, 3, 1, 10, 0), grade="V6"),
+        make_ascent(when=datetime(2026, 3, 1, 11, 0), grade="V3"),
+    ]
+    return group_sessions(ascents, min_duration_minutes=1)[0]
+
+
 def test_fit_is_valid_and_parses_back():
     messages, errors = _decode(build_fit_bytes(_session()))
     assert errors == []
-    assert "file_id_mesgs" in messages
     assert messages["file_id_mesgs"][0]["type"] == "activity"
     assert len(messages["session_mesgs"]) == 1
     assert len(messages["activity_mesgs"]) == 1
+
+
+def test_fit_identifies_as_garmin_enduro2():
+    # Garmin's importer trusts a real-watch identity; a DEVELOPMENT manufacturer
+    # gets silently dropped.
+    messages, _ = _decode(build_fit_bytes(_session()))
+    file_id = messages["file_id_mesgs"][0]
+    assert file_id["manufacturer"] == "garmin"
+    assert file_id["garmin_product"] == "enduro2"
+
+
+def test_fit_has_file_creator():
+    messages, _ = _decode(build_fit_bytes(_session()))
+    assert messages["file_creator_mesgs"]
 
 
 def test_fit_has_climbing_sport():
@@ -38,11 +67,15 @@ def test_fit_has_climbing_sport():
     session = messages["session_mesgs"][0]
     assert session["sport"] == "rock_climbing"
     assert session["sub_sport"] == "bouldering"
+    sport = messages["sport_mesgs"][0]
+    assert sport["sport"] == "rock_climbing"
+    assert sport["sub_sport"] == "bouldering"
 
 
 def test_fit_indoor_climbing_subsport():
     messages, _ = _decode(build_fit_bytes(_session(), sub_sport="indoor_climbing"))
     assert messages["session_mesgs"][0]["sub_sport"] == "indoor_climbing"
+    assert messages["sport_mesgs"][0]["sub_sport"] == "indoor_climbing"
 
 
 def test_fit_elapsed_time_matches_duration():
@@ -51,11 +84,9 @@ def test_fit_elapsed_time_matches_duration():
     assert messages["session_mesgs"][0]["total_elapsed_time"] == pytest.approx(45 * 60)
 
 
-def test_fit_activity_is_manual_single_session():
+def test_fit_activity_single_session():
     messages, _ = _decode(build_fit_bytes(_session()))
-    activity = messages["activity_mesgs"][0]
-    assert activity["num_sessions"] == 1
-    assert activity["type"] == "manual"
+    assert messages["activity_mesgs"][0]["num_sessions"] == 1
 
 
 def test_invalid_sub_sport_raises():
@@ -68,26 +99,17 @@ def test_write_fit_creates_file(tmp_path):
     result = write_fit(_session(), out)
     assert result == out
     assert out.exists() and out.stat().st_size > 0
-    messages, errors = _decode(out.read_bytes())
+    _, errors = _decode(out.read_bytes())
     assert errors == []
 
 
-def _multi_climb_session():
-    ascents = [
-        make_ascent(when=datetime(2026, 3, 1, 9, 0), grade="V4"),
-        make_ascent(when=datetime(2026, 3, 1, 9, 30), grade="V5"),
-        make_ascent(when=datetime(2026, 3, 1, 10, 0), grade="V6"),
-        make_ascent(when=datetime(2026, 3, 1, 11, 0), grade="V3"),
-    ]
-    return group_sessions(ascents, min_duration_minutes=1)[0]
-
-
-def test_fit_has_one_lap_per_climb():
+def test_fit_has_single_session_spanning_lap():
+    # Exactly one lap for the whole session (NOT one per climb).
     session = _multi_climb_session()
     messages, errors = _decode(build_fit_bytes(session))
     assert errors == []
-    assert len(messages["lap_mesgs"]) == len(session.ascents)
-    assert messages["session_mesgs"][0]["num_laps"] == len(session.ascents)
+    assert len(messages["lap_mesgs"]) == 1
+    assert messages["session_mesgs"][0]["num_laps"] == 1
 
 
 def test_fit_has_calories_and_training_effect():
@@ -102,17 +124,15 @@ def test_fit_has_calories_and_training_effect():
     assert session_msg["total_anaerobic_training_effect"] == pytest.approx(
         metrics.anaerobic_te
     )
-    # Per-lap calories sum back to the session total.
-    lap_calories = sum(lap.get("total_calories", 0) for lap in messages["lap_mesgs"])
-    assert lap_calories == metrics.calories
+    # The single lap carries the full session calorie total.
+    assert messages["lap_mesgs"][0]["total_calories"] == metrics.calories
 
 
-def test_fit_laps_carry_sub_sport():
+def test_fit_lap_carries_sub_sport():
     messages, _ = _decode(
         build_fit_bytes(_multi_climb_session(), sub_sport="indoor_climbing")
     )
-    for lap in messages["lap_mesgs"]:
-        assert lap["sub_sport"] == "indoor_climbing"
+    assert messages["lap_mesgs"][0]["sub_sport"] == "indoor_climbing"
 
 
 def test_fit_has_one_climb_active_split_per_climb():
@@ -124,6 +144,13 @@ def test_fit_has_one_climb_active_split_per_climb():
     assert all(sp["split_type"] == "climb_active" for sp in splits)
 
 
+def test_fit_splits_have_no_climb_send_field():
+    # Field 73 (climb_send) is deliberately omitted; the watch never sets it.
+    messages, _ = _decode(build_fit_bytes(_multi_climb_session()))
+    for sp in messages["split_mesgs"]:
+        assert 73 not in sp
+
+
 def test_fit_split_summary_num_splits_is_route_count():
     session = _multi_climb_session()
     messages, _ = _decode(build_fit_bytes(session))
@@ -133,22 +160,25 @@ def test_fit_split_summary_num_splits_is_route_count():
     assert summaries[0]["num_splits"] == len(session.ascents)
 
 
+def test_fit_split_summary_max_grade():
+    # Hardest of V4/V5/V6/V3 is V6 -> vermin enum 7 (field 55).
+    messages, _ = _decode(build_fit_bytes(_multi_climb_session()))
+    assert messages["split_summary_mesgs"][0][55] == 7
+
+
 def test_fit_splits_carry_vermin_grades():
     # V4 -> vermin enum 5, V5 -> 6, V6 -> 7, V3 -> 4 (raw = V + 1).
-    session = _multi_climb_session()
-    messages, _ = _decode(build_fit_bytes(session))
+    messages, _ = _decode(build_fit_bytes(_multi_climb_session()))
     grades = [sp.get(70) for sp in messages["split_mesgs"]]
     assert grades == [5, 6, 7, 4]
-    # All graded splits use the V-scale (vermin) grading scale enum = 8.
+    # Every split declares the V-scale (vermin) grading scale enum = 8.
     scales = [sp.get(69) for sp in messages["split_mesgs"]]
     assert scales == [8, 8, 8, 8]
 
 
 def test_fit_split_max_difficulty_is_hardest_route():
-    session = _multi_climb_session()
-    messages, _ = _decode(build_fit_bytes(session))
+    messages, _ = _decode(build_fit_bytes(_multi_climb_session()))
     grade_values = [sp[70] for sp in messages["split_mesgs"] if 70 in sp]
-    # Hardest is V6 -> vermin enum 7.
     assert max(grade_values) == 7
 
 
@@ -160,9 +190,13 @@ def test_fit_split_send_vs_attempt_status():
     session = group_sessions(ascents, min_duration_minutes=1)[0]
     messages, _ = _decode(build_fit_bytes(session))
     splits = messages["split_mesgs"]
-    # Field 71 = split_status (3 completed / 2 attempted), 73 = climb_send.
-    assert splits[0][71] == 3 and splits[0][73] == 1
-    assert splits[1][71] == 2 and splits[1][73] == 0
+    # Field 71 = split_status: 3 completed (send) / 2 attempted.
+    assert splits[0][71] == 3
+    assert splits[1][71] == 2
+    # summary field 59 = completed, 58 = attempted.
+    summary = messages["split_summary_mesgs"][0]
+    assert summary[59] == 1
+    assert summary[58] == 1
 
 
 def test_fit_unrated_climb_counts_as_route_without_grade():
@@ -176,6 +210,5 @@ def test_fit_unrated_climb_counts_as_route_without_grade():
     splits = messages["split_mesgs"]
     assert len(splits) == 2
     assert messages["split_summary_mesgs"][0]["num_splits"] == 2
-    # Unrated climb carries no grade fields.
-    assert 70 not in splits[1] and 69 not in splits[1]
-
+    # Unrated climb still declares a grading scale but carries no grade value.
+    assert 70 not in splits[1]

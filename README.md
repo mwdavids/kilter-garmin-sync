@@ -180,16 +180,16 @@ them into each activity:
 - **Estimated Training Effect** — rough aerobic/anaerobic numbers on Garmin's
   0.0–5.0 scale (anaerobic-weighted, since bouldering is anaerobic). Stored in
   the FIT session as `total_training_effect` / `total_anaerobic_training_effect`.
-- **Per-climb laps** — one FIT *lap* per logged climb. Since Kilter doesn't
-  record per-climb durations, lap timing is estimated by distributing the
-  session window evenly across the climbs (documented in `fit_writer.py`).
-- **Total Routes & Max Difficulty** — Garmin's native bouldering fields. The tool
-  emits one FIT `split` message (`split_type = climb_active`) per logged climb,
-  plus a `split_summary`, so Garmin Connect shows **Total Routes** = the number
-  of climbs. Each graded climb carries its **V-grade** on the split, so Garmin
-  shows **Max Difficulty** = your hardest climb that day. See
-  [Total Routes / Max Difficulty](#total-routes--max-difficulty-fit-fields) below
-  for the exact FIT fields.
+- **Session lap** — one FIT *lap* spanning the whole session, matching what a
+  Garmin watch emits for a bouldering activity. Per-climb structure lives in the
+  `split` messages instead (see below).
+- **Per-climb splits & grades** — the tool emits one FIT `split` message
+  (`split_type = climb_active`) per logged climb, each carrying that climb's
+  **V-grade** and send/attempt status, plus a session `split_summary`. In Garmin
+  Connect the activity shows the individual routes with their grades. See
+  [Bouldering routes & grades](#bouldering-routes--grades-fit-fields) below for
+  the exact FIT fields and an important note on Garmin's aggregate "Total Routes
+  / Max Grade" tiles.
 
 All of these are **estimates**, labelled as such in the notes. The only measured
 facts are the timestamps, grades, angles, and send/attempt flags from Kilter.
@@ -209,31 +209,50 @@ wrong calendar day.
   `-7h` in summer vs PST `-8h` in winter) so Garmin shows the correct local time.
 - TCX `Id`/`StartTime` are written as UTC `Z` timestamps.
 
-### Total Routes / Max Difficulty (FIT fields)
+### Bouldering routes & grades (FIT fields)
 
-Garmin populates a bouldering activity's **Total Routes** and **Max Difficulty**
-from FIT `split` messages, *not* the session/lap data. The bundled `fit_tool` /
-`garmin-fit-sdk` profiles don't name the climbing grade fields (they're newer
-than those profiles), so the tool writes them by their FIT global field number
-on the `split` message (global mesg 312):
+Getting Garmin to **import** a manually-uploaded bouldering FIT at all turned out
+to require reproducing the structure a real Garmin watch emits — a from-scratch
+file (manufacturer `DEVELOPMENT`, one lap per climb) is accepted at upload with an
+`uploadId` but silently never becomes an activity. So the generated file:
+
+- identifies as a Garmin **Enduro 2** (`file_id.manufacturer = garmin`,
+  `product = enduro2`) with a `file_creator`, `sport` (`rock_climbing` /
+  `bouldering`), a single session-spanning `lap`, one `session`, and an
+  `activity` message;
+- emits one `split` message (`split_type = climb_active`, global mesg 312) per
+  logged climb, plus one `split_summary`.
+
+The bundled `fit_tool` / `garmin-fit-sdk` profiles don't name the climbing grade
+fields (they're newer than those profiles), so the tool writes them by their FIT
+field number on the `split` message:
 
 | Field | # | Meaning |
 | ----- | - | ------- |
 | `climb_grading_scale` | 69 | grade system enum; `8` = V-scale (vermin) |
 | `climb_grade_value`   | 70 | grade on that scale; for V-scale it's the `vermin` enum, `V + 1` (V0 → 1, V4 → 5) |
 | `status`              | 71 | `3` = climb completed (send), `2` = attempted |
-| `climb_send`          | 73 | `1` for a send, `0` for an attempt |
 
-- **Total Routes** = the count of `climb_active` splits (also carried in
-  `split_summary.num_splits`).
-- **Max Difficulty** = the maximum `climb_grade_value` across the splits.
-- Unrated climbs still emit a split (so they count toward Total Routes) but carry
-  no grade fields.
+Each split also carries `253` (session start, FIT-epoch seconds) and a set of
+constant envelope fields copied from a real watch file. Unrated climbs still emit
+a split (so they count as a route) but carry no `climb_grade_value`. The
+`split_summary` records `num_splits` (route count) and the max grade. The tool
+deliberately does **not** emit field `73` (`climb_send`) — the watch never sets it
+and it isn't needed.
 
-The generated file still decodes cleanly with `garmin-fit-sdk` (verified in the
-tests). Because these are less-documented FIT fields, the definitive confirmation
-that Garmin Connect renders both values is a real upload; that's pending a Garmin
-token in CI.
+> **Garmin limitation — aggregate tiles don't populate on manual upload.**
+> Garmin Connect's **Total Routes** and **Max Grade** summary tiles come from a
+> `splitSummaries` block that Garmin computes only in its *device-sync* ingestion
+> pipeline, **not** for manually-uploaded FIT files. This was proven by
+> re-uploading a real watch file byte-for-byte through the upload API: it still
+> produced `splitSummaries: None`, while the device-synced copy had it. So an
+> uploaded file shows the **individual routes with their grades** (which works
+> great) but not the aggregate tiles. The tool still writes the clean
+> `split_summary` (it's harmless and correct); this is a Garmin platform
+> limitation of manual FIT upload, not something the file can fix.
+
+The generated file decodes cleanly with `garmin-fit-sdk` (verified in the tests),
+and the recipe is upload-verified end-to-end against a live Garmin account.
 
 
 ## Auto-upload to Garmin Connect (optional)
@@ -270,9 +289,14 @@ reusable token, then store it as a secret.
 Duplicate protection for uploads is twofold: Garmin rejects a re-upload of the
 same file with HTTP **409**, which the tool treats as "already uploaded"; and a
 local **upload ledger** (`data/uploaded.json`, cached across CI runs) records
-uploaded filenames so repeat runs skip the network call entirely. If neither a
-token nor email/password is available, `--upload` prints a clear message and the
-generated files are still written for manual import.
+uploaded filenames so repeat runs skip the network call entirely. Garmin often
+accepts an upload *asynchronously* (returning an `uploadId` with no immediate
+result), so the tool polls the activity list for a bounded time to confirm the
+activity actually materialized before recording it; if it can't confirm, the
+file is reported **pending** and is *not* written to the ledger, so the next run
+retries it rather than silently dropping it. If neither a token nor
+email/password is available, `--upload` prints a clear message and the generated
+files are still written for manual import.
 
 ### Login rate-limits & the garth 429 header fix
 

@@ -89,6 +89,68 @@ def test_upload_file_duplicate_via_response(tmp_path):
     assert result.status == "duplicate"
 
 
+class _AsyncClient(FakeClient):
+    """Garmin accepts the file async (uploadId, no result); connectapi is scriptable.
+
+    ``activity_lists`` is consumed one entry per connectapi call (the first call
+    is the pre-upload snapshot); the final entry repeats for later polls.
+    """
+
+    def __init__(self, activity_lists, upload_resp):
+        super().__init__(responses=[upload_resp])
+        self._activity_lists = list(activity_lists)
+        self.connectapi_calls = 0
+
+    def connectapi(self, path, **kwargs):
+        self.connectapi_calls += 1
+        if len(self._activity_lists) > 1:
+            return self._activity_lists.pop(0)
+        return self._activity_lists[0]
+
+
+_ASYNC_RESP = {
+    "detailedImportResult": {"uploadId": 555, "successes": [], "failures": []}
+}
+
+
+def test_upload_file_async_confirmed(tmp_path):
+    # Snapshot before upload is empty; after upload a new activity appears.
+    client = _AsyncClient([[], [{"activityId": 999}]], _ASYNC_RESP)
+    result = upload_file(client, _fit(tmp_path), sleeper=lambda *_: None)
+    assert result.status == "uploaded"
+    assert result.activity_id == 999
+    assert result.ok is True
+
+
+def test_upload_file_async_pending_when_no_activity(tmp_path):
+    # Activity never materializes: bounded polling gives up and returns pending.
+    client = _AsyncClient([[]], _ASYNC_RESP)
+    times = iter([0.0, 0.0, 999.0])
+    result = upload_file(
+        client,
+        _fit(tmp_path),
+        sleeper=lambda *_: None,
+        clock=lambda: next(times),
+    )
+    assert result.status == "pending"
+    assert result.ok is False
+
+
+def test_pending_upload_not_recorded_in_ledger(tmp_path):
+    # A pending result (ok=False) must not be added to the ledger, so it retries.
+    ledger = UploadLedger(tmp_path / "uploaded.json")
+    pending = upload_file(
+        _AsyncClient([[]], _ASYNC_RESP),
+        _fit(tmp_path),
+        sleeper=lambda *_: None,
+        clock=iter([0.0, 0.0, 999.0]).__next__,
+    )
+    assert pending.status == "pending"
+    if pending.ok:
+        ledger.add(pending.path.name)
+    assert not ledger.contains("kilter-2026-03-01.fit")
+
+
 def test_upload_files_skips_ledger_entries(tmp_path):
     ledger = UploadLedger(tmp_path / "uploaded.json")
     a = _fit(tmp_path)
