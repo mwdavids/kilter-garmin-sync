@@ -1,27 +1,39 @@
 name: Export Kilter activities
 
-# Runs the exporter on a GitHub-hosted runner, which can reach kilterboardapp.com
-# even when your local corporate network (e.g. Microsoft Global Secure Access)
-# TLS-blocks it. The generated .fit/.tcx files are published as a build artifact
-# for you to download and import into Garmin Connect manually.
+# Runs the exporter on a GitHub-hosted runner, which can reach the new Kilter
+# backend (kiltergrips.com) even when your local corporate network (e.g.
+# Microsoft Global Secure Access) TLS-blocks it or throttles the sync stream.
+# The generated .fit/.tcx files are published as a build artifact for you to
+# download and import into Garmin Connect manually.
+#
+# The "diagnose" mode is a Phase-1 investigation aid: it enumerates the
+# object_types the backend syncs into your account (user_buckets) so we can
+# confirm ascents are present. It writes no activity files.
 
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: What to run
+        type: choice
+        options:
+          - export
+          - diagnose
+        default: export
       format:
-        description: Output file format
+        description: "[export] Output file format"
         type: choice
         options:
           - fit
           - tcx
         default: fit
       since:
-        description: "Only export sessions on or after this date (YYYY-MM-DD, optional)"
+        description: "[export] Only export sessions on or after this date (YYYY-MM-DD, optional)"
         type: string
         required: false
         default: ""
       sub_sport:
-        description: FIT climbing sub-sport (ignored for TCX)
+        description: "[export] FIT climbing sub-sport (ignored for TCX)"
         type: choice
         options:
           - bouldering
@@ -49,7 +61,25 @@ jobs:
           pip install -r requirements.txt
           pip install .
 
+      - name: Diagnose user_buckets
+        if: ${{ inputs.mode == 'diagnose' }}
+        env:
+          KILTER_USERNAME: ${{ secrets.KILTER_USERNAME }}
+          KILTER_PASSWORD: ${{ secrets.KILTER_PASSWORD }}
+        run: |
+          mkdir -p diag
+          python -m kilter_garmin_sync.diagnose --json-out diag/user-buckets.json
+
+      - name: Upload diagnostics
+        if: ${{ inputs.mode == 'diagnose' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kilter-diagnostics
+          path: diag/**
+          if-no-files-found: warn
+
       - name: Export sessions
+        if: ${{ inputs.mode == 'export' }}
         env:
           KILTER_USERNAME: ${{ secrets.KILTER_USERNAME }}
           KILTER_PASSWORD: ${{ secrets.KILTER_PASSWORD }}
@@ -61,6 +91,7 @@ jobs:
           kilter-garmin-sync "${args[@]}" --verbose
 
       - name: Upload activity files
+        if: ${{ inputs.mode == 'export' }}
         uses: actions/upload-artifact@v4
         with:
           name: kilter-activities
