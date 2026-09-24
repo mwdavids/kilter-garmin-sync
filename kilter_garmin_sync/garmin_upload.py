@@ -16,12 +16,19 @@ Duplicate protection: Garmin itself rejects a re-upload of the same activity
 file with HTTP 409 (``detailedImportResult`` status), which we treat as
 "already uploaded" rather than an error. We also keep a small local ledger of
 uploaded filenames so repeat runs skip the network call entirely.
+
+Async confirmation: Garmin frequently accepts an upload for asynchronous
+processing, returning an ``uploadId`` with empty successes/failures. That is
+NOT a confirmed import, so we poll the activity list for a bounded time to
+confirm a new activity materialized. If it doesn't, the file is reported
+``"pending"`` (not recorded in the ledger) so the next run retries it.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -29,6 +36,12 @@ from typing import Any, Callable
 TOKEN_ENV = "GARMIN_TOKEN"
 EMAIL_ENV = "GARMIN_EMAIL"
 PASSWORD_ENV = "GARMIN_PASSWORD"
+
+# Garmin's upload endpoint often returns an ``uploadId`` with EMPTY
+# successes/failures: the file was accepted for ASYNC processing, not
+# confirmed imported. We poll this activity-search endpoint to confirm a new
+# activity actually materialized before recording success.
+ACTIVITY_SEARCH_PATH = "/activitylist-service/activities/search/activities"
 
 
 class GarminAuthError(RuntimeError):
@@ -153,7 +166,10 @@ def resume_client(
 @dataclass
 class UploadResult:
     path: Path
-    status: str  # "uploaded", "duplicate", or "skipped"
+    # "uploaded"/"duplicate"/"skipped" are terminal successes; "pending" means
+    # Garmin queued the file but no activity has confirmed yet (ok=False, so the
+    # ledger does not record it and the next run retries).
+    status: str
     activity_id: int | None = None
 
     @property
@@ -212,9 +228,77 @@ def _parse_upload_response(resp: dict[str, Any]) -> UploadResult | None:
     return None
 
 
-def upload_file(client: Any, path: str | Path) -> UploadResult:
-    """Upload one FIT/TCX file, treating a 409 duplicate as success."""
+def _is_async_queued(resp: Any) -> bool:
+    """True if Garmin accepted the file for async processing (uploadId, no result).
+
+    An ``uploadId`` with empty ``successes`` and ``failures`` means "queued",
+    NOT imported: the activity can still silently fail to materialize.
+    """
+    detail = resp.get("detailedImportResult") if isinstance(resp, dict) else None
+    if not isinstance(detail, dict):
+        return False
+    if detail.get("successes") or detail.get("failures"):
+        return False
+    return detail.get("uploadId") is not None
+
+
+def _recent_activity_ids(client: Any, limit: int = 10) -> set[int]:
+    """Return the internal ids of the most recent Garmin activities (best effort)."""
+    try:
+        resp = client.connectapi(
+            ACTIVITY_SEARCH_PATH, params={"limit": limit, "start": 0}
+        )
+    except Exception:  # noqa: BLE001 - network/attr errors just mean "unknown"
+        return set()
+    ids: set[int] = set()
+    if isinstance(resp, list):
+        for item in resp:
+            if isinstance(item, dict) and item.get("activityId") is not None:
+                ids.add(item["activityId"])
+    return ids
+
+
+def _confirm_async_upload(
+    client: Any,
+    before_ids: set[int],
+    *,
+    timeout: float,
+    poll_interval: float,
+    sleeper: Callable[[float], Any],
+    clock: Callable[[], float],
+) -> int | None:
+    """Poll the activity list until a new activity appears; return its id or None."""
+    start = clock()
+    delay = poll_interval
+    while True:
+        new_ids = _recent_activity_ids(client) - before_ids
+        if new_ids:
+            return max(new_ids)
+        if clock() - start >= timeout:
+            return None
+        sleeper(delay)
+        delay = min(delay * 2, 30.0)
+
+
+def upload_file(
+    client: Any,
+    path: str | Path,
+    *,
+    confirm: bool = True,
+    confirm_timeout: float = 180.0,
+    confirm_poll_interval: float = 5.0,
+    sleeper: Callable[[float], Any] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> UploadResult:
+    """Upload one FIT/TCX file, treating a 409 duplicate as success.
+
+    When Garmin returns an ``uploadId`` with no successes/failures (the common
+    async case), we poll the activity list for up to ``confirm_timeout`` seconds
+    to confirm a new activity materialized. If it doesn't, we return a
+    ``"pending"`` result (ok=False) so the caller does not record it and retries.
+    """
     path = Path(path)
+    before = _recent_activity_ids(client) if confirm else set()
     try:
         with path.open("rb") as fp:
             resp = client.upload(fp)
@@ -225,6 +309,18 @@ def upload_file(client: Any, path: str | Path) -> UploadResult:
     parsed = _parse_upload_response(resp) if isinstance(resp, dict) else None
     if parsed is not None:
         return UploadResult(path, parsed.status, parsed.activity_id)
+    if confirm and _is_async_queued(resp):
+        activity_id = _confirm_async_upload(
+            client,
+            before,
+            timeout=confirm_timeout,
+            poll_interval=confirm_poll_interval,
+            sleeper=sleeper,
+            clock=clock,
+        )
+        if activity_id is None:
+            return UploadResult(path, "pending")
+        return UploadResult(path, "uploaded", activity_id)
     return UploadResult(path, "uploaded")
 
 

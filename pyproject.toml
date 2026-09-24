@@ -32,5 +32,8 @@ kilter-garmin-sync = "kilter_garmin_sync.cli:main"
 where = ["."]
 include = ["kilter_garmin_sync*"]
 
+[tool.setuptools.package-data]
+kilter_garmin_sync = ["data/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
