@@ -41,3 +41,10 @@ def make_ascent(
 @pytest.fixture
 def fixture_csv() -> Path:
     return FIXTURE_CSV
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    """Run each test in its own temp cwd so the default ``data/`` ledger and
+    SQLite cache never leak across tests or into the repo."""
+    monkeypatch.chdir(tmp_path)

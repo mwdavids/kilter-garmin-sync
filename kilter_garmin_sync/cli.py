@@ -12,6 +12,7 @@ from . import __version__
 from .boardlib_source import load_csv
 from .fit_writer import SUB_SPORTS, write_fit
 from .kilter_source import fetch_ascents
+from .ledger import Ledger, session_fingerprint
 from .models import Session
 from .sessions import group_sessions
 from .summary import session_notes, session_title
@@ -101,7 +102,21 @@ def build_parser() -> argparse.ArgumentParser:
         default="bouldering",
         help="FIT climbing sub-sport (default: bouldering; ignored for TCX).",
     )
-    out.add_argument("--overwrite", action="store_true", help="Regenerate files even if they already exist.")
+    out.add_argument("--overwrite", action="store_true", help="Regenerate files even if they already exist or are recorded in the ledger.")
+    out.add_argument(
+        "--ledger",
+        default="data/exported.json",
+        metavar="PATH",
+        help=(
+            "Path to the export ledger that records already-exported session days "
+            "so re-runs skip them (default: data/exported.json)."
+        ),
+    )
+    out.add_argument(
+        "--no-ledger",
+        action="store_true",
+        help="Disable the export ledger (do not read or write it).",
+    )
     out.add_argument("--dry-run", action="store_true", help="List sessions and target files without writing.")
 
     grouping = parser.add_argument_group("session grouping")
@@ -198,31 +213,57 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out)
     filenames = _assign_filenames(sessions, args.format)
 
+    use_ledger = not args.no_ledger
+    ledger_path = Path(args.ledger)
+    ledger = Ledger.load(ledger_path) if use_ledger else None
+
     written = skipped = 0
     for i, session in enumerate(sessions):
         target = out_dir / filenames[i]
+        day_key = f"{session.day:%Y-%m-%d}"
+        fingerprint = session_fingerprint(session)
 
         if args.dry_run:
-            print(f"[dry-run] {target}  |  {session_title(session)}")
+            status = ledger.status(day_key, fingerprint) if ledger else "new"
+            tag = "" if status == "new" else f"  [{status}]"
+            print(f"[dry-run] {target}  |  {session_title(session)}{tag}")
             if args.verbose:
                 for line in session_notes(session).splitlines():
                     print(f"    {line}")
             continue
 
-        if target.exists() and not args.overwrite:
-            skipped += 1
-            if args.verbose:
-                print(f"skip (exists): {target}", file=sys.stderr)
-            continue
+        if not args.overwrite:
+            status = ledger.status(day_key, fingerprint) if ledger else "new"
+            if status == "unchanged":
+                skipped += 1
+                if args.verbose:
+                    print(f"skip (already exported): {target}", file=sys.stderr)
+                continue
+            if status == "changed":
+                skipped += 1
+                print(
+                    f"skip (changed since last export; use --overwrite to regenerate): {target}",
+                    file=sys.stderr,
+                )
+                continue
+            if status == "new" and target.exists():
+                skipped += 1
+                if args.verbose:
+                    print(f"skip (exists): {target}", file=sys.stderr)
+                continue
 
         if args.format == "fit":
             write_fit(session, target, sub_sport=args.sub_sport)
         else:
             write_tcx(session, target)
         written += 1
+        if ledger is not None:
+            ledger.record(day_key, fingerprint, filenames[i], args.format)
         print(f"wrote {target}  ({session_title(session)})")
 
     if not args.dry_run:
+        if ledger is not None:
+            ledger.save(ledger_path)
         print(f"\nDone: {written} written, {skipped} skipped, {len(sessions)} sessions total.")
     return 0
 
