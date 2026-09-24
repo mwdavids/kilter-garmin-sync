@@ -119,7 +119,9 @@ use and testing with a legacy BoardLib CSV.
 | `--since`         | —               | Only export sessions on/after `YYYY-MM-DD`.                               |
 | `--min-duration`  | `10`            | Minimum session length in minutes (short sessions are padded).           |
 | `--ascents-only`  | off             | Exclude attempt-only entries (keep only sends).                          |
-| `--overwrite`     | off             | Regenerate files even if they already exist.                             |
+| `--overwrite`     | off             | Regenerate files even if they already exist or are in the ledger.        |
+| `--ledger PATH`   | `data/exported.json` | Ledger of already-exported days; re-runs skip them.                 |
+| `--no-ledger`     | off             | Ignore the ledger entirely (read nor write).                             |
 | `--dry-run`       | off             | List sessions and target files without writing.                          |
 
 ### Session grouping
@@ -128,11 +130,28 @@ use and testing with a legacy BoardLib CSV.
 same day goes into a single session. The session's duration is first→last ascent
 that day (padded to `--min-duration` when a day has a single ascent).
 
-### Incremental use
+### Incremental use / duplicate protection
 
-Re-running is cheap: sessions whose output file already exists are **skipped**
-unless you pass `--overwrite`. Combine with `--since` to only look at recent
-dates. Filenames are `kilter-YYYY-MM-DD.<ext>`.
+The tool keeps an **export ledger** (`data/exported.json` by default) recording
+which session days it has already generated, with a content fingerprint of that
+day's ascents. On every run each day is classified:
+
+- **new** — not exported before → written and recorded.
+- **unchanged** — already exported, ascents identical → **skipped**.
+- **changed** — already exported but that day's ascents changed since (e.g. you
+  logged more climbs later that day) → **skipped with a warning**; pass
+  `--overwrite` to regenerate it.
+
+So re-running never re-creates a file for a day you've already exported, even if
+you deleted the files from `./out`. Garmin Connect itself does **not**
+de-duplicate imports, so this ledger is what stops you from importing the same
+session twice — only import the newly-written files each run. As a second guard,
+a `new` day whose file already exists in `--out` is also skipped. Use
+`--overwrite` to force regeneration, `--no-ledger` to ignore the ledger, or
+`--since` to limit the date range. Filenames are `kilter-YYYY-MM-DD.<ext>`.
+
+In the cloud (GitHub Actions) the ledger is carried across runs with
+`actions/cache`, so a fresh runner still skips days exported by earlier runs.
 
 ## Run it in the cloud (GitHub Actions)
 
@@ -157,7 +176,9 @@ the export in the cloud instead and download the files.
    - `tz` — IANA timezone (e.g. `America/Los_Angeles`) for local-day grouping.
 3. **Download the artifact.** When the run finishes, open it and download the
    **`kilter-activities`** artifact (a zip of `out/**`). Unzip it to get one
-   `.fit`/`.tcx` per session.
+   `.fit`/`.tcx` per session. Thanks to the ledger (cached across runs), a later
+   run's artifact contains only **newly-exported** days, so you won't re-import
+   duplicates.
 4. **Import to Garmin** using the steps in the next section.
 
 Generated activity files and the Kilter database are produced only inside the
@@ -225,6 +246,7 @@ kilter_garmin_sync/
   diagnose.py         inspect what the backend syncs into your account
   models.py           Ascent and Session data models
   sessions.py         group ascents into one session per calendar day
+  ledger.py           export ledger: skip already-exported session days
   summary.py          human-readable title + notes
   fit_writer.py       FIT generation (fit-tool)
   tcx_writer.py       TCX generation

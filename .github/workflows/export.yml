@@ -83,6 +83,19 @@ jobs:
           path: diag/**
           if-no-files-found: warn
 
+      - name: Restore export ledger
+        if: ${{ inputs.mode == 'export' }}
+        uses: actions/cache@v4
+        with:
+          # Carries the de-duplication ledger across runs so already-exported
+          # session days are skipped even on a fresh runner. The run-id key
+          # always misses (forcing a fresh save), while restore-keys pulls the
+          # most recent previous ledger.
+          path: data/exported.json
+          key: kilter-ledger-${{ github.run_id }}
+          restore-keys: |
+            kilter-ledger-
+
       - name: Export sessions
         if: ${{ inputs.mode == 'export' }}
         env:
