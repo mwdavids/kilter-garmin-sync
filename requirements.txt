@@ -1,6 +1,9 @@
 # Runtime dependencies
 boardlib>=0.9
 fit-tool>=0.9.13
+# BoardLib imports PIL (Pillow) at module load but doesn't declare it; pin it
+# explicitly so a clean install / CI runner has it.
+Pillow>=9.0
 
 # Dev/test (parse-back validation of generated FIT files, test runner)
 garmin-fit-sdk>=21.115
