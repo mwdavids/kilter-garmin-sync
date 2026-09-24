@@ -109,6 +109,11 @@ def test_summarize_counts_and_samples_user_buckets_only():
     # user bucket surfaced from the checkpoint message.
     assert summary["checkpoint_buckets"][0]["count"] == 3
 
+    # The global catalog spans ALL buckets (incl. global_climbs "climbs").
+    catalog = summary["global_catalog"]
+    assert catalog["climbs"]["count"] == 1
+    assert catalog["ascents"]["count"] == 2
+
 
 def test_ascent_detection_and_report():
     summary = summarize_user_buckets(fake_stream())

@@ -39,6 +39,11 @@ on:
           - bouldering
           - indoor_climbing
         default: bouldering
+      tz:
+        description: "[export] IANA timezone for local-day grouping (e.g. America/Los_Angeles)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -87,6 +92,9 @@ jobs:
           args=(--format "${{ inputs.format }}" --sub-sport "${{ inputs.sub_sport }}" --out out)
           if [ -n "${{ inputs.since }}" ]; then
             args+=(--since "${{ inputs.since }}")
+          fi
+          if [ -n "${{ inputs.tz }}" ]; then
+            args+=(--tz "${{ inputs.tz }}")
           fi
           kilter-garmin-sync "${args[@]}" --verbose
 

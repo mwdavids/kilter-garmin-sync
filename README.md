@@ -1,10 +1,11 @@
 # kilter-garmin-sync
 
-Export your **Kilter Board** (Aurora Climbing) logbook into **Garmin-importable
-activity files** — one file per climbing session — so you can manually import
-your board sessions into Garmin Connect.
+Export your **Kilter Board** (by **Kilter Grips**) logbook into
+**Garmin-importable activity files** — one file per climbing session — so you can
+manually import your board sessions into Garmin Connect.
 
-- Fetches your ascents/attempts via [BoardLib](https://github.com/lemeryfertitta/BoardLib).
+- Fetches your ascents/attempts directly from the **new Kilter Grips backend**
+  (`kiltergrips.com`): Keycloak auth + PowerSync data sync (no third-party API).
 - Groups them into **one activity per calendar day**.
 - Writes one activity file per session to `./out`.
 - **FIT** output (default) imports as a native **Bouldering** activity; **TCX**
@@ -14,6 +15,29 @@ your board sessions into Garmin Connect.
 There is **no heart-rate, calorie, or GPS data** on a board session; that's
 expected. The generated files carry valid timing + activity type (+ a summary),
 which is all Garmin Connect needs to import them.
+
+> **Data-source note:** Kilter split from Aurora Climbing and removed the old
+> Aurora API that [BoardLib](https://github.com/lemeryfertitta/BoardLib)
+> targeted — `kilterboardapp.com` is dead, so the BoardLib live-fetch path no
+> longer works for Kilter. This tool now talks to the current Kilter Grips
+> backend instead. The `--from-csv` path still accepts a legacy BoardLib logbook
+> CSV for offline use.
+
+## Backend limitations (read this)
+
+The new Kilter Grips backend syncs your **logbook** to your account, but a
+couple of fields simply aren't available to a user token:
+
+- **Climb names are not served.** There is no climb-name table in the sync and
+  no REST endpoint returns a name for a climb UUID (verified). Climbs are
+  therefore labelled **`Climb <uuid8>`** (first 8 hex chars of the UUID).
+- **Consensus grade is not synced.** The community/consensus grade
+  (`climb_stats`) isn't available, so the grade shown is **your own rating** —
+  and only for climbs you personally rated. Unrated climbs show no grade.
+
+Everything else is intact: **duration** (first→last ascent that day), **angle**,
+**send vs attempt**, attempt counts, and the **per-grade histogram** in the
+summary.
 
 ## Install
 
@@ -27,13 +51,14 @@ python -m pip install .
 
 ## Authentication
 
-Credentials are **never hardcoded**. Provide your Kilter account username and
-put the password in an environment variable:
+Credentials are **never hardcoded**. Provide your **Kilter Grips** account
+username and put the password in an environment variable. Auth uses the Keycloak
+*password* grant against `idp.kiltergrips.com`.
 
-| Value    | Source                                                        |
+| Value    | Source                                                       |
 | -------- | ------------------------------------------------------------ |
 | username | `--username` flag, or the `KILTER_USERNAME` environment var  |
-| password | the `KILTER_PASSWORD` environment variable (read by BoardLib) |
+| password | the `KILTER_PASSWORD` environment variable                   |
 
 ```powershell
 # Windows PowerShell
@@ -46,9 +71,6 @@ $env:KILTER_PASSWORD = "your-password"
 export KILTER_USERNAME="you@example.com"
 export KILTER_PASSWORD="your-password"
 ```
-
-The password variable follows the board name: for a different Aurora board pass
-`--board tension` and set `TENSION_PASSWORD`, etc.
 
 ## Usage
 
@@ -73,20 +95,24 @@ You can also run it as a module: `python -m kilter_garmin_sync --help`.
 
 ### How fetching works
 
-On a fetch run the tool shells out to BoardLib to (1) download/sync the shared
-board database to `--db-path` (default `data/kilter.db`, reused on later runs)
-and (2) export your logbook, which it then parses in memory. The `--from-csv`
-path skips all of this and needs no credentials — handy for offline use and
-testing.
+On a fetch run the tool (1) authenticates to Kilter Grips via the Keycloak
+password grant, (2) streams your data from PowerSync (`sync1.kiltergrips.com`),
+and (3) maps your `logs` entries — joined against your personal climb ratings —
+into the internal `Ascent` model. Synced rows are cached to a local SQLite file
+(`--db-path`, default `data/kilter.db`) unless you pass `--no-cache`. The
+`--from-csv` path skips all of this and needs no credentials — handy for offline
+use and testing with a legacy BoardLib CSV.
 
 ### Options
 
 | Flag              | Default         | Description                                                               |
 | ----------------- | --------------- | ------------------------------------------------------------------------- |
-| `--from-csv PATH` | —               | Use an existing BoardLib logbook CSV; skip fetching (no credentials).     |
-| `--username`      | `KILTER_USERNAME` | Board account username/email.                                           |
-| `--board`         | `kilter`        | Aurora board name (kilter, tension, ...).                                 |
-| `--db-path`       | `data/kilter.db`| BoardLib SQLite DB path (downloaded/synced on fetch).                     |
+| `--from-csv PATH` | —               | Use a legacy BoardLib logbook CSV; skip fetching (no credentials).       |
+| `--username`      | `KILTER_USERNAME` | Kilter Grips account username/email.                                   |
+| `--board`         | `kilter`        | Board name (drives the `<BOARD>_PASSWORD` env var; only `kilter` is live).|
+| `--db-path`       | `data/kilter.db`| Local SQLite cache of synced PowerSync rows.                             |
+| `--no-cache`      | off             | Don't write the local SQLite cache when fetching.                        |
+| `--tz`            | system local    | IANA timezone (e.g. `America/Los_Angeles`) for local-day grouping.       |
 | `--out`           | `out`           | Output directory.                                                         |
 | `--format`        | `fit`           | `fit` (native climbing type) or `tcx` (summary in notes, sport "Other"). |
 | `--sub-sport`     | `bouldering`    | FIT climbing sub-sport: `bouldering` or `indoor_climbing`.               |
@@ -110,21 +136,25 @@ dates. Filenames are `kilter-YYYY-MM-DD.<ext>`.
 
 ## Run it in the cloud (GitHub Actions)
 
-If your local network TLS-blocks `kilterboardapp.com` (for example Microsoft
-Global Secure Access / a corporate secure edge), the fetch will fail on your
-machine. GitHub-hosted runners are **not** behind that edge, so you can run the
-export in the cloud instead and download the files.
+If your local network blocks or throttles the Kilter Grips backend
+(`kiltergrips.com` — for example Microsoft Global Secure Access or a corporate
+secure edge that TLS-inspects the sync stream), the fetch will fail or crawl on
+your machine. GitHub-hosted runners are **not** behind that edge, so you can run
+the export in the cloud instead and download the files.
 
-1. **Add your Kilter credentials as repo secrets** (they are never printed and
-   never committed). In the GitHub repo: **Settings → Secrets and variables →
-   Actions → New repository secret**. Add two:
-   - `KILTER_USERNAME` — your Kilter/Aurora account email.
-   - `KILTER_PASSWORD` — your Kilter/Aurora password.
+1. **Add your Kilter Grips credentials as repo secrets** (they are never printed
+   and never committed). In the GitHub repo: **Settings → Secrets and variables
+   → Actions → New repository secret**. Add two:
+   - `KILTER_USERNAME` — your Kilter Grips account email.
+   - `KILTER_PASSWORD` — your Kilter Grips password.
 2. **Trigger the workflow.** Go to the **Actions** tab → **Export Kilter
    activities** → **Run workflow**. Optionally set:
+   - `mode` — `export` (default) or `diagnose` (enumerates what the backend
+     syncs into your account; writes no activity files).
    - `format` — `fit` (default) or `tcx`.
    - `since` — `YYYY-MM-DD` to only export sessions on or after that date.
    - `sub_sport` — `bouldering` (default) or `indoor_climbing` (FIT only).
+   - `tz` — IANA timezone (e.g. `America/Los_Angeles`) for local-day grouping.
 3. **Download the artifact.** When the run finishes, open it and download the
    **`kilter-activities`** artifact (a zip of `out/**`). Unzip it to get one
    `.fit`/`.tcx` per session.
@@ -146,12 +176,13 @@ Notes on what you'll see:
 
 - **FIT files** import as a **Bouldering** activity (the native climbing type),
   with the correct **duration**. Garmin Connect does not display free text from
-  a FIT file, so the climb summary (grades, names, angles) lives only in the
+  a FIT file, so the climb summary (grades, angles, labels) lives only in the
   **filename** — rename the activity afterward if you want.
 - **TCX files** import as sport **Other**, but the full climb summary appears in
-  the activity's **Notes/Comments**: climb names, angles, per-climb grades,
-  sends vs attempts, the **hardest send**, and a **per-grade send count**
-  (e.g. `V8×1, V6×1, V4×1`), plus the time window and duration.
+  the activity's **Notes/Comments**: climb labels (`Climb <id>` — see
+  limitations), angles, per-climb grades, sends vs attempts, the **hardest
+  send**, and a **per-grade send count** (e.g. `V8×1, V6×1, V4×1`), plus the time
+  window and duration.
 - Either way there is **no heart rate, calories, or distance** — board sessions
   don't record them.
 
@@ -188,13 +219,16 @@ back with the Garmin SDK and re-parsing every TCX as XML to confirm validity.
 ```
 kilter_garmin_sync/
   cli.py              CLI + orchestration
-  boardlib_source.py  fetch via BoardLib / load logbook CSV -> Ascent[]
+  kilter_client.py    new Kilter Grips backend: Keycloak auth + PowerSync stream
+  kilter_source.py    map synced logs (+ your ratings) -> Ascent[]; SQLite cache
+  boardlib_source.py  load a legacy BoardLib logbook CSV -> Ascent[] (offline)
+  diagnose.py         inspect what the backend syncs into your account
   models.py           Ascent and Session data models
   sessions.py         group ascents into one session per calendar day
   summary.py          human-readable title + notes
   fit_writer.py       FIT generation (fit-tool)
   tcx_writer.py       TCX generation
-tests/                pytest suite + fixture logbook
+tests/                pytest suite + fixtures (no credentials needed)
 ```
 
 ## License
