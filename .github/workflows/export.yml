@@ -11,6 +11,10 @@ name: Export Kilter activities
 # confirm ascents are present. It writes no activity files.
 
 on:
+  schedule:
+    # 13:00 UTC = ~06:00 America/Los_Angeles. A scheduled run always exports
+    # FIT bouldering in America/Los_Angeles and auto-uploads new sessions.
+    - cron: "0 13 * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -92,47 +96,66 @@ jobs:
           path: diag/**
           if-no-files-found: warn
 
+      - name: Compute ledger cache date
+        if: ${{ inputs.mode != 'diagnose' }}
+        id: ledger_date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Restore export ledger
-        if: ${{ inputs.mode == 'export' }}
+        if: ${{ inputs.mode != 'diagnose' }}
         uses: actions/cache@v4
         with:
           # Carries the de-duplication ledgers across runs so already-exported
           # session days (and already-uploaded files) are skipped even on a
-          # fresh runner. The run-id key always misses (forcing a fresh save),
-          # while restore-keys pulls the most recent previous ledger.
+          # fresh runner. The key is date-based (stable, not the run id or a
+          # content hash) so it persists night to night: each new day writes a
+          # fresh immutable entry, and restore-keys pulls the most recent prior
+          # ledger so the upload history keeps growing across nightly runs.
           path: |
             data/exported.json
             data/uploaded.json
-          key: kilter-ledger-${{ github.run_id }}
+          key: kilter-ledger-${{ steps.ledger_date.outputs.date }}
           restore-keys: |
             kilter-ledger-
 
       - name: Export sessions
-        if: ${{ inputs.mode == 'export' }}
+        if: ${{ inputs.mode != 'diagnose' }}
         env:
           KILTER_USERNAME: ${{ secrets.KILTER_USERNAME }}
           KILTER_PASSWORD: ${{ secrets.KILTER_PASSWORD }}
-          # Only used when 'upload' is enabled. Mint it once locally with
+          # Only used when upload is enabled. Mint it once locally with
           # 'kilter-garmin-sync garmin-login' and store it as this secret.
           GARMIN_TOKEN: ${{ secrets.GARMIN_TOKEN }}
+          # Effective settings: each falls back from the workflow_dispatch input
+          # to the scheduled default (inputs.* are empty on a schedule event).
+          FORMAT: ${{ inputs.format || 'fit' }}
+          SUB_SPORT: ${{ inputs.sub_sport || 'bouldering' }}
+          TZ_NAME: ${{ inputs.tz || 'America/Los_Angeles' }}
+          WEIGHT_LB: ${{ inputs.weight_lb }}
+          SINCE_INPUT: ${{ inputs.since }}
+          # De-dup floor for auto-upload: the user already imported everything on
+          # or before 2026-09-23, so only export/upload sessions from this date on.
+          UPLOAD_SINCE: ${{ vars.UPLOAD_SINCE || '2026-09-24' }}
+          # Upload on every scheduled run; on manual runs honor the checkbox.
+          UPLOAD: ${{ (github.event_name == 'schedule' || inputs.upload) && 'true' || 'false' }}
         run: |
-          args=(--format "${{ inputs.format }}" --sub-sport "${{ inputs.sub_sport }}" --out out)
-          if [ -n "${{ inputs.since }}" ]; then
-            args+=(--since "${{ inputs.since }}")
+          args=(--format "$FORMAT" --sub-sport "$SUB_SPORT" --tz "$TZ_NAME" --out out)
+          # A manual run uses its own 'since' if given; otherwise (and always on a
+          # schedule) apply the UPLOAD_SINCE floor so we never re-touch old sessions.
+          SINCE="${SINCE_INPUT:-$UPLOAD_SINCE}"
+          if [ -n "$SINCE" ]; then
+            args+=(--since "$SINCE")
           fi
-          if [ -n "${{ inputs.tz }}" ]; then
-            args+=(--tz "${{ inputs.tz }}")
+          if [ -n "$WEIGHT_LB" ]; then
+            args+=(--weight-lb "$WEIGHT_LB")
           fi
-          if [ -n "${{ inputs.weight_lb }}" ]; then
-            args+=(--weight-lb "${{ inputs.weight_lb }}")
-          fi
-          if [ "${{ inputs.upload }}" = "true" ]; then
+          if [ "$UPLOAD" = "true" ]; then
             args+=(--upload)
           fi
           kilter-garmin-sync "${args[@]}" --verbose
 
       - name: Upload activity files
-        if: ${{ inputs.mode == 'export' }}
+        if: ${{ inputs.mode != 'diagnose' }}
         uses: actions/upload-artifact@v4
         with:
           name: kilter-activities
