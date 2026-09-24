@@ -26,7 +26,6 @@ from kilter_garmin_sync.kilter_client import (
     KilterAuthError,
     KilterSyncError,
     get_access_token,
-    iter_data_ops,
     stream_sync,
 )
 
@@ -48,43 +47,54 @@ def summarize_user_buckets(messages: Iterable[dict[str, Any]]) -> dict[str, Any]
     checkpoint_buckets: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     samples: dict[str, dict[str, Any]] = {}
+    # Global catalog: object_type -> count + first-seen sample (all buckets).
+    global_counts: Counter[str] = Counter()
+    global_samples: dict[str, dict[str, Any]] = {}
+    # All checkpoint buckets (name -> declared op count) + received op counts,
+    # so we can detect a bucket that is announced but never streamed.
+    all_checkpoint_buckets: "OrderedDict[str, Any]" = OrderedDict()
+    bucket_op_counts: Counter[str] = Counter()
     saw_complete = False
 
-    def handle(msg: dict[str, Any]) -> bool:
-        """Process one message; return False to stop iteration."""
-        nonlocal saw_complete
+    for msg in messages:
         if "checkpoint" in msg and isinstance(msg["checkpoint"], dict):
             for b in msg["checkpoint"].get("buckets", []) or []:
                 name = b.get("bucket", "")
+                all_checkpoint_buckets[name] = b.get("count")
                 if name.startswith(USER_BUCKET_PREFIX):
                     checkpoint_buckets.append(
                         {"bucket": name, "count": b.get("count")}
                     )
         if "checkpoint_complete" in msg:
             saw_complete = True
-            return False
-        return True
+            break
 
-    # We need both the checkpoint scan and the per-op scan, so tee the stream
-    # through a small generator that records checkpoints and stops on complete.
-    def gated() -> Iterable[dict[str, Any]]:
-        for msg in messages:
-            keep_going = handle(msg)
-            yield msg
-            if not keep_going:
-                return
-
-    for _bucket, op in iter_data_ops(
-        gated(), bucket_prefix=USER_BUCKET_PREFIX, stop_at_checkpoint_complete=True
-    ):
-        object_type = op.get("object_type") or "<unknown>"
-        if op.get("op") == "REMOVE":
+        data_msg = msg.get("data")
+        if not isinstance(data_msg, dict):
             continue
-        counts[object_type] += 1
-        if object_type not in samples:
+        bucket = data_msg.get("bucket", "")
+        is_user = bucket.startswith(USER_BUCKET_PREFIX)
+        for op in data_msg.get("data", []) or []:
+            bucket_op_counts[bucket] += 1
+            if op.get("op") == "REMOVE":
+                continue
+            object_type = op.get("object_type") or "<unknown>"
             row = op.get("data")
-            if isinstance(row, dict):
-                samples[object_type] = row
+            if isinstance(row, str):
+                try:
+                    row = json.loads(row)
+                except json.JSONDecodeError:  # pragma: no cover - defensive
+                    row = None
+            row = row if isinstance(row, dict) else {}
+
+            global_counts[object_type] += 1
+            if object_type not in global_samples and row:
+                global_samples[object_type] = row
+
+            if is_user:
+                counts[object_type] += 1
+                if object_type not in samples and row:
+                    samples[object_type] = row
 
     object_types: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
     for object_type, count in counts.most_common():
@@ -95,9 +105,27 @@ def summarize_user_buckets(messages: Iterable[dict[str, Any]]) -> dict[str, Any]
             "sample": sample,
         }
 
+    global_catalog: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+    for object_type, count in global_counts.most_common():
+        sample = global_samples.get(object_type, {})
+        global_catalog[object_type] = {
+            "count": count,
+            "fields": sorted(sample.keys()),
+            "sample": sample,
+        }
+
     return {
         "checkpoint_buckets": checkpoint_buckets,
         "object_types": object_types,
+        "global_catalog": global_catalog,
+        "all_checkpoint_buckets": [
+            {
+                "bucket": name,
+                "declared": declared,
+                "received": bucket_op_counts.get(name, 0),
+            }
+            for name, declared in all_checkpoint_buckets.items()
+        ],
         "saw_checkpoint_complete": saw_complete,
     }
 
@@ -164,6 +192,39 @@ def format_report(summary: dict[str, Any]) -> str:
             "(sync may be incomplete)."
         )
     lines.append("-" * 70)
+
+    # All checkpoint buckets with declared vs received op counts, so a bucket
+    # that is announced but never streamed (e.g. the climb catalog) is obvious.
+    all_buckets = summary.get("all_checkpoint_buckets", [])
+    if all_buckets:
+        lines.append("\n" + "=" * 70)
+        lines.append(f"ALL CHECKPOINT BUCKETS: {len(all_buckets)}")
+        lines.append("=" * 70)
+        for b in all_buckets:
+            gap = ""
+            if b.get("declared") and b.get("received", 0) < b["declared"]:
+                gap = "   <-- DECLARED > RECEIVED (not fully streamed)"
+            lines.append(
+                f"  - {b['bucket']}  declared={b.get('declared')} "
+                f"received={b.get('received')}{gap}"
+            )
+
+    # Global catalog across ALL buckets — needed to locate climb names and the
+    # difficulty->grade mapping for the Phase-2 JOIN.
+    catalog = summary.get("global_catalog", {})
+    if catalog:
+        lines.append("\n" + "=" * 70)
+        lines.append(f"GLOBAL CATALOG (all buckets): {len(catalog)} object_types")
+        lines.append("=" * 70)
+        for object_type, info in catalog.items():
+            lines.append(f"\n  * {object_type}  (count={info['count']})")
+            lines.append(f"      fields: {', '.join(info['fields']) or '(none)'}")
+            sample = info.get("sample") or {}
+            if sample:
+                lines.append(
+                    f"      sample: {json.dumps(sample, default=str)[:400]}"
+                )
+
     return "\n".join(lines)
 
 
@@ -172,6 +233,7 @@ def _redacted_summary_for_artifact(summary: dict[str, Any]) -> dict[str, Any]:
     which are the user's own climb metadata, never tokens/passwords)."""
     return {
         "checkpoint_buckets": summary.get("checkpoint_buckets", []),
+        "all_checkpoint_buckets": summary.get("all_checkpoint_buckets", []),
         "saw_checkpoint_complete": summary.get("saw_checkpoint_complete", False),
         "object_types": {
             ot: {
@@ -181,6 +243,14 @@ def _redacted_summary_for_artifact(summary: dict[str, Any]) -> dict[str, Any]:
                 "ascent_like": _looks_like_ascents(ot, info["fields"]),
             }
             for ot, info in summary.get("object_types", {}).items()
+        },
+        "global_catalog": {
+            ot: {
+                "count": info["count"],
+                "fields": info["fields"],
+                "sample": info.get("sample", {}),
+            }
+            for ot, info in summary.get("global_catalog", {}).items()
         },
     }
 

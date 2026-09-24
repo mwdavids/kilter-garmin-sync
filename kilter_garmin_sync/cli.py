@@ -9,8 +9,9 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import __version__
-from .boardlib_source import fetch_logbook, load_csv
+from .boardlib_source import load_csv
 from .fit_writer import SUB_SPORTS, write_fit
+from .kilter_source import fetch_ascents
 from .models import Session
 from .sessions import group_sessions
 from .summary import session_notes, session_title
@@ -57,18 +58,33 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument(
         "--username",
         default=os.environ.get("KILTER_USERNAME"),
-        help="Board account username/email (or set KILTER_USERNAME). Password comes from KILTER_PASSWORD.",
+        help="Kilter account username/email (or set KILTER_USERNAME). Password comes from KILTER_PASSWORD.",
     )
     source.add_argument(
         "--board",
         default="kilter",
-        help="Aurora board name (default: kilter).",
+        help="Board name (default: kilter). Determines the <BOARD>_PASSWORD env var.",
     )
     source.add_argument(
         "--db-path",
         default="data/kilter.db",
         metavar="PATH",
-        help="Path to the BoardLib SQLite database, downloaded/synced on fetch (default: data/kilter.db).",
+        help="Path to the local SQLite cache of synced rows (default: data/kilter.db).",
+    )
+    source.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Do not write the local SQLite cache when fetching.",
+    )
+    source.add_argument(
+        "--tz",
+        metavar="ZONE",
+        default=os.environ.get("KILTER_TZ"),
+        help=(
+            "IANA timezone (e.g. America/Los_Angeles) used to convert ascent "
+            "timestamps to your local calendar day for grouping. Default: system "
+            "local time (or set KILTER_TZ)."
+        ),
     )
 
     out = parser.add_argument_group("output")
@@ -143,17 +159,20 @@ def _load_ascents(args: argparse.Namespace, parser: argparse.ArgumentParser):
     if not args.username:
         parser.error(
             "no data source: pass --from-csv, or provide --username/KILTER_USERNAME "
-            "(with KILTER_PASSWORD set) to fetch from the board."
+            "(with KILTER_PASSWORD set) to fetch from Kilter."
         )
     password_var = f"{args.board.upper()}_PASSWORD"
-    if not os.environ.get(password_var):
+    password = os.environ.get(password_var)
+    if not password:
         parser.error(
             f"{password_var} environment variable is not set; required to fetch the logbook."
         )
-    return fetch_logbook(
-        board=args.board,
-        username=args.username,
-        database_path=args.db_path,
+    cache_db = None if args.no_cache else Path(args.db_path)
+    return fetch_ascents(
+        args.username,
+        password,
+        tz_name=args.tz,
+        cache_db=cache_db,
     )
 
 

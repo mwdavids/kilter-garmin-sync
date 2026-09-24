@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 
 @dataclass
 class Ascent:
-    """A single logged entry from a Kilter/Aurora logbook (a send or an attempt)."""
+    """A single logged entry from a Kilter logbook (a send or an attempt)."""
 
     board: str
     angle: int | None
