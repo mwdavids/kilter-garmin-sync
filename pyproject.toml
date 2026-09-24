@@ -12,6 +12,8 @@ license = { text = "MIT" }
 dependencies = [
     "boardlib>=0.9",
     "fit-tool>=0.9.13",
+    # BoardLib imports PIL (Pillow) at module load but doesn't declare it.
+    "Pillow>=9.0",
 ]
 
 [project.optional-dependencies]
