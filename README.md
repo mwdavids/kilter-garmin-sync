@@ -183,9 +183,58 @@ them into each activity:
 - **Per-climb laps** — one FIT *lap* per logged climb. Since Kilter doesn't
   record per-climb durations, lap timing is estimated by distributing the
   session window evenly across the climbs (documented in `fit_writer.py`).
+- **Total Routes & Max Difficulty** — Garmin's native bouldering fields. The tool
+  emits one FIT `split` message (`split_type = climb_active`) per logged climb,
+  plus a `split_summary`, so Garmin Connect shows **Total Routes** = the number
+  of climbs. Each graded climb carries its **V-grade** on the split, so Garmin
+  shows **Max Difficulty** = your hardest climb that day. See
+  [Total Routes / Max Difficulty](#total-routes--max-difficulty-fit-fields) below
+  for the exact FIT fields.
 
 All of these are **estimates**, labelled as such in the notes. The only measured
 facts are the timestamps, grades, angles, and send/attempt flags from Kilter.
+
+### Local time & timezone
+
+Kilter stores each ascent's time in **UTC**. Garmin displays an activity using
+the *local* time offset embedded in the file, so getting the timezone right
+matters — otherwise activities can show the wrong start time or even land on the
+wrong calendar day.
+
+- Sessions are grouped by **local calendar day** in the resolved timezone
+  (`--tz`, default `America/Los_Angeles` in the GitHub Actions workflow; system
+  local time otherwise).
+- FIT time fields encode the **true UTC instant**, and the FIT `activity`
+  message sets `local_timestamp` to the local wall-clock (DST-aware, e.g. PDT
+  `-7h` in summer vs PST `-8h` in winter) so Garmin shows the correct local time.
+- TCX `Id`/`StartTime` are written as UTC `Z` timestamps.
+
+### Total Routes / Max Difficulty (FIT fields)
+
+Garmin populates a bouldering activity's **Total Routes** and **Max Difficulty**
+from FIT `split` messages, *not* the session/lap data. The bundled `fit_tool` /
+`garmin-fit-sdk` profiles don't name the climbing grade fields (they're newer
+than those profiles), so the tool writes them by their FIT global field number
+on the `split` message (global mesg 312):
+
+| Field | # | Meaning |
+| ----- | - | ------- |
+| `climb_grading_scale` | 69 | grade system enum; `8` = V-scale (vermin) |
+| `climb_grade_value`   | 70 | grade on that scale; for V-scale it's the `vermin` enum, `V + 1` (V0 → 1, V4 → 5) |
+| `status`              | 71 | `3` = climb completed (send), `2` = attempted |
+| `climb_send`          | 73 | `1` for a send, `0` for an attempt |
+
+- **Total Routes** = the count of `climb_active` splits (also carried in
+  `split_summary.num_splits`).
+- **Max Difficulty** = the maximum `climb_grade_value` across the splits.
+- Unrated climbs still emit a split (so they count toward Total Routes) but carry
+  no grade fields.
+
+The generated file still decodes cleanly with `garmin-fit-sdk` (verified in the
+tests). Because these are less-documented FIT fields, the definitive confirmation
+that Garmin Connect renders both values is a real upload; that's pending a Garmin
+token in CI.
+
 
 ## Auto-upload to Garmin Connect (optional)
 
@@ -224,6 +273,30 @@ local **upload ledger** (`data/uploaded.json`, cached across CI runs) records
 uploaded filenames so repeat runs skip the network call entirely. If neither a
 token nor email/password is available, `--upload` prints a clear message and the
 generated files are still written for manual import.
+
+### Login rate-limits & the garth 429 header fix
+
+Two separate Garmin rate-limits are worth knowing about:
+
+- **garth 0.8.0 login header regression (patched).** The bundled garth version
+  sends browser-style headers (`SSO_PAGE_HEADERS`, a desktop User-Agent) on its
+  `/mobile/api/login` and `/mobile/api/mfa/verifyCode` POSTs, which Garmin's
+  mobile API rejects with **HTTP 429** (garth
+  [PR #218](https://github.com/matin/garth/pull/218) /
+  [issue #217](https://github.com/matin/garth/issues/217)). `garmin_upload.py`
+  installs a small runtime monkeypatch (`patch_garth_mobile_headers`, called
+  before `garth.login`) that strips those browser headers from just those two
+  POSTs — the sign-in GET and the `/portal/sso/embed` GET keep them — so the
+  default mobile User-Agent is used and login succeeds. It's idempotent and a
+  no-op if garth's internals change.
+- **IP-reputation limiting on the SSO login endpoint.** Garmin's SSO *login*
+  endpoint is also rate-limited by IP reputation: residential IPs are generally
+  fine, but datacenter IPs (including some CI runners) are often blocked. That's
+  why the recommended flow is to **mint the token once from your own machine**.
+  The token-based `--upload` path talks to a *different* endpoint
+  (`/upload-service/upload`) and is **not** affected by that login limit, so
+  uploading from CI with a saved `GARMIN_TOKEN` works.
+
 
 ## Run it in the cloud (GitHub Actions)
 

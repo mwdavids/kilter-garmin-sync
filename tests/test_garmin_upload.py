@@ -137,3 +137,85 @@ def test_make_token_returns_dump():
     token = make_token("me@example.com", "pw", garth_module=garth)
     assert token == "BASE64TOKEN"
     assert garth.logged_in_with == ("me@example.com", "pw")
+
+
+class _RecordingClient:
+    """Records the headers the underlying request() actually receives."""
+
+    last: dict | None = None
+
+    def request(self, method, subdomain, path, *args, **kwargs):
+        type(self).last = {
+            "method": method,
+            "path": path,
+            "headers": kwargs.get("headers"),
+        }
+        return "ok"
+
+
+def _fake_garth_with_http():
+    from types import SimpleNamespace
+
+    client_cls = type("Client", (_RecordingClient,), {})
+    return SimpleNamespace(http=SimpleNamespace(Client=client_cls))
+
+
+def test_patch_strips_browser_headers_on_mobile_login():
+    from garth.sso import SSO_PAGE_HEADERS
+
+    from kilter_garmin_sync.garmin_upload import patch_garth_mobile_headers
+
+    garth = _fake_garth_with_http()
+    assert patch_garth_mobile_headers(garth) is True
+
+    client = garth.http.Client()
+    client.request("POST", "sso", "/mobile/api/login", headers=dict(SSO_PAGE_HEADERS))
+    sent = client.last["headers"]
+    # The browser SSO headers (desktop User-Agent etc.) must be gone.
+    assert "User-Agent" not in sent
+    for key in SSO_PAGE_HEADERS:
+        assert key not in sent
+
+
+def test_patch_strips_browser_headers_on_mfa_verify():
+    from garth.sso import SSO_PAGE_HEADERS
+
+    from kilter_garmin_sync.garmin_upload import patch_garth_mobile_headers
+
+    garth = _fake_garth_with_http()
+    patch_garth_mobile_headers(garth)
+    client = garth.http.Client()
+    client.request(
+        "POST", "sso", "/mobile/api/mfa/verifyCode", headers=dict(SSO_PAGE_HEADERS)
+    )
+    assert "User-Agent" not in client.last["headers"]
+
+
+def test_patch_keeps_browser_headers_on_sso_get():
+    from garth.sso import SSO_PAGE_HEADERS
+
+    from kilter_garmin_sync.garmin_upload import patch_garth_mobile_headers
+
+    garth = _fake_garth_with_http()
+    patch_garth_mobile_headers(garth)
+    client = garth.http.Client()
+    # The sign-in GET and /portal/sso/embed GET still need the browser headers.
+    client.request("GET", "sso", "/sso", headers=dict(SSO_PAGE_HEADERS))
+    assert client.last["headers"]["User-Agent"] == SSO_PAGE_HEADERS["User-Agent"]
+
+
+def test_patch_is_idempotent():
+    from kilter_garmin_sync.garmin_upload import patch_garth_mobile_headers
+
+    garth = _fake_garth_with_http()
+    assert patch_garth_mobile_headers(garth) is True
+    # Second call must not re-wrap; it should report the patch is present.
+    assert patch_garth_mobile_headers(garth) is True
+
+
+def test_patch_noop_without_http_module():
+    from kilter_garmin_sync.garmin_upload import patch_garth_mobile_headers
+
+    # A garth stand-in without an http.Client (as in the other fakes) is a no-op.
+    assert patch_garth_mobile_headers(FakeGarth()) is False
+

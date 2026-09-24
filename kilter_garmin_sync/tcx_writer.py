@@ -25,7 +25,11 @@ SCHEMA_LOCATION = (
 
 
 def _iso(t: datetime) -> str:
-    """Format a naive local datetime as a UTC ISO-8601 Zulu timestamp."""
+    """Format a datetime as a UTC ISO-8601 Zulu timestamp.
+
+    Timezone-aware inputs are converted straight to UTC (correct on any host);
+    naive inputs are assumed to be system-local time first.
+    """
     if t.tzinfo is None:
         t = t.astimezone()
     return t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

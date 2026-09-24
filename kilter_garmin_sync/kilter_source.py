@@ -68,15 +68,15 @@ def _parse_created_at(value: str) -> datetime:
     return dt
 
 
-def _to_local_naive(dt: datetime, tz: Any) -> datetime:
-    """Convert an aware datetime to ``tz`` and drop tzinfo.
+def _to_local(dt: datetime, tz: Any) -> datetime:
+    """Convert an aware UTC datetime to ``tz``, keeping it timezone-aware.
 
-    The rest of the pipeline treats :attr:`Ascent.date` as a naive *local* time
-    and groups by its calendar date, so we localise here (default: system local
-    time when ``tz`` is None).
+    Day-grouping keys off the local calendar date (``dt.date()`` in the resolved
+    tz), and the FIT/TCX writers need the aware value so they can encode the true
+    UTC instant plus the local display offset. When ``tz`` is None we fall back
+    to system local time (still aware).
     """
-    local = dt.astimezone(tz) if tz is not None else dt.astimezone()
-    return local.replace(tzinfo=None)
+    return dt.astimezone(tz) if tz is not None else dt.astimezone()
 
 
 def resolve_tz(tz_name: str | None) -> Any:
@@ -166,7 +166,7 @@ def build_ascents(
         climb_uuid = log.get("climb_uuid") or ""
         angle = _int_or_none(log.get("angle"))
         try:
-            when = _to_local_naive(_parse_created_at(log.get("created_at", "")), tz)
+            when = _to_local(_parse_created_at(log.get("created_at", "")), tz)
         except ValueError:
             continue  # a log without a usable timestamp can't be placed in a day
 
