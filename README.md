@@ -108,6 +108,31 @@ Re-running is cheap: sessions whose output file already exists are **skipped**
 unless you pass `--overwrite`. Combine with `--since` to only look at recent
 dates. Filenames are `kilter-YYYY-MM-DD.<ext>`.
 
+## Run it in the cloud (GitHub Actions)
+
+If your local network TLS-blocks `kilterboardapp.com` (for example Microsoft
+Global Secure Access / a corporate secure edge), the fetch will fail on your
+machine. GitHub-hosted runners are **not** behind that edge, so you can run the
+export in the cloud instead and download the files.
+
+1. **Add your Kilter credentials as repo secrets** (they are never printed and
+   never committed). In the GitHub repo: **Settings → Secrets and variables →
+   Actions → New repository secret**. Add two:
+   - `KILTER_USERNAME` — your Kilter/Aurora account email.
+   - `KILTER_PASSWORD` — your Kilter/Aurora password.
+2. **Trigger the workflow.** Go to the **Actions** tab → **Export Kilter
+   activities** → **Run workflow**. Optionally set:
+   - `format` — `fit` (default) or `tcx`.
+   - `since` — `YYYY-MM-DD` to only export sessions on or after that date.
+   - `sub_sport` — `bouldering` (default) or `indoor_climbing` (FIT only).
+3. **Download the artifact.** When the run finishes, open it and download the
+   **`kilter-activities`** artifact (a zip of `out/**`). Unzip it to get one
+   `.fit`/`.tcx` per session.
+4. **Import to Garmin** using the steps in the next section.
+
+Generated activity files and the Kilter database are produced only inside the
+runner and uploaded as an artifact — they are **not** committed to the repo.
+
 ## Importing into Garmin Connect
 
 Garmin Connect (web) can import activity files manually:
