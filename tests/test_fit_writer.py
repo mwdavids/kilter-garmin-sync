@@ -113,3 +113,69 @@ def test_fit_laps_carry_sub_sport():
     )
     for lap in messages["lap_mesgs"]:
         assert lap["sub_sport"] == "indoor_climbing"
+
+
+def test_fit_has_one_climb_active_split_per_climb():
+    session = _multi_climb_session()
+    messages, errors = _decode(build_fit_bytes(session))
+    assert errors == []
+    splits = messages["split_mesgs"]
+    assert len(splits) == len(session.ascents)
+    assert all(sp["split_type"] == "climb_active" for sp in splits)
+
+
+def test_fit_split_summary_num_splits_is_route_count():
+    session = _multi_climb_session()
+    messages, _ = _decode(build_fit_bytes(session))
+    summaries = messages["split_summary_mesgs"]
+    assert len(summaries) == 1
+    assert summaries[0]["split_type"] == "climb_active"
+    assert summaries[0]["num_splits"] == len(session.ascents)
+
+
+def test_fit_splits_carry_vermin_grades():
+    # V4 -> vermin enum 5, V5 -> 6, V6 -> 7, V3 -> 4 (raw = V + 1).
+    session = _multi_climb_session()
+    messages, _ = _decode(build_fit_bytes(session))
+    grades = [sp.get(70) for sp in messages["split_mesgs"]]
+    assert grades == [5, 6, 7, 4]
+    # All graded splits use the V-scale (vermin) grading scale enum = 8.
+    scales = [sp.get(69) for sp in messages["split_mesgs"]]
+    assert scales == [8, 8, 8, 8]
+
+
+def test_fit_split_max_difficulty_is_hardest_route():
+    session = _multi_climb_session()
+    messages, _ = _decode(build_fit_bytes(session))
+    grade_values = [sp[70] for sp in messages["split_mesgs"] if 70 in sp]
+    # Hardest is V6 -> vermin enum 7.
+    assert max(grade_values) == 7
+
+
+def test_fit_split_send_vs_attempt_status():
+    ascents = [
+        make_ascent(when=datetime(2026, 3, 1, 9, 0), grade="V4", is_ascent=True),
+        make_ascent(when=datetime(2026, 3, 1, 9, 30), grade="V5", is_ascent=False),
+    ]
+    session = group_sessions(ascents, min_duration_minutes=1)[0]
+    messages, _ = _decode(build_fit_bytes(session))
+    splits = messages["split_mesgs"]
+    # Field 71 = split_status (3 completed / 2 attempted), 73 = climb_send.
+    assert splits[0][71] == 3 and splits[0][73] == 1
+    assert splits[1][71] == 2 and splits[1][73] == 0
+
+
+def test_fit_unrated_climb_counts_as_route_without_grade():
+    ascents = [
+        make_ascent(when=datetime(2026, 3, 1, 9, 0), grade="V4"),
+        make_ascent(when=datetime(2026, 3, 1, 9, 30), grade=None),
+    ]
+    session = group_sessions(ascents, min_duration_minutes=1)[0]
+    messages, errors = _decode(build_fit_bytes(session))
+    assert errors == []
+    splits = messages["split_mesgs"]
+    assert len(splits) == 2
+    assert messages["split_summary_mesgs"][0]["num_splits"] == 2
+    # Unrated climb carries no grade fields.
+    assert 70 not in splits[1] and 69 not in splits[1]
+

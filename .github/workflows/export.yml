@@ -43,7 +43,7 @@ on:
         description: "[export] IANA timezone for local-day grouping (e.g. America/Los_Angeles)"
         type: string
         required: false
-        default: ""
+        default: "America/Los_Angeles"
       upload:
         description: "[export] Also auto-upload to Garmin Connect (needs GARMIN_TOKEN secret)"
         type: boolean

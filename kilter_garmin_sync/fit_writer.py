@@ -15,6 +15,8 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+from fit_tool.base_type import BaseType
+from fit_tool.field import Field
 from fit_tool.fit_file_builder import FitFileBuilder
 from fit_tool.profile.messages.activity_message import ActivityMessage
 from fit_tool.profile.messages.event_message import EventMessage
@@ -22,6 +24,8 @@ from fit_tool.profile.messages.file_id_message import FileIdMessage
 from fit_tool.profile.messages.lap_message import LapMessage
 from fit_tool.profile.messages.record_message import RecordMessage
 from fit_tool.profile.messages.session_message import SessionMessage
+from fit_tool.profile.messages.split_message import SplitMessage
+from fit_tool.profile.messages.split_summary_message import SplitSummaryMessage
 from fit_tool.profile.profile_type import (
     Activity,
     Event,
@@ -31,21 +35,92 @@ from fit_tool.profile.profile_type import (
     Manufacturer,
     SessionTrigger,
     Sport,
+    SplitType,
     SubSport,
 )
 
-from .metrics import SessionMetrics, compute_metrics
-from .models import Session
+from .metrics import SessionMetrics, compute_metrics, grade_value
+from .models import Ascent, Session
 
 SUB_SPORTS = {
     "bouldering": SubSport.BOULDERING,
     "indoor_climbing": SubSport.INDOOR_CLIMBING,
 }
 
+# Climbing fields on the FIT `split` message (global mesg 312). These exist in
+# the current Garmin FIT profile (21.217) but are newer than the fields the
+# bundled fit-tool / garmin-fit-sdk name, so we write them as raw fields by
+# their global field-definition number. Garmin Connect reads them to populate
+# a bouldering activity's "Total Routes" and "Max Difficulty".
+#   69 climb_grading_scale (enum climb_grading_scale)
+#   70 climb_grade_value    (uint32; for the vermin scale this is the
+#                            vermin_grading_scale enum: VB=0, V0=1, V1=2, ...)
+#   71 status               (enum split_status: climb_attempted=2, climb_completed=3)
+#   73 climb_send           (enum/bool: 1 = sent)
+FIELD_CLIMB_GRADING_SCALE = 69
+FIELD_CLIMB_GRADE_VALUE = 70
+FIELD_SPLIT_STATUS = 71
+FIELD_CLIMB_SEND = 73
+
+# climb_grading_scale enum value for the V-scale (a.k.a. Vermin/Hueco).
+GRADING_SCALE_VERMIN = 8
+# split_status enum values.
+SPLIT_STATUS_CLIMB_ATTEMPTED = 2
+SPLIT_STATUS_CLIMB_COMPLETED = 3
+# vermin_grading_scale caps at V17 (enum 18); VB is 0, so raw = V + 1.
+VERMIN_MAX_ENUM = 18
+
+
+def _vermin_enum(grade: str | None) -> int | None:
+    """Map a V-scale grade string to the FIT ``vermin_grading_scale`` enum.
+
+    ``V0`` -> 1, ``V4`` -> 5, ... (VB -> 0). Non-V/unrated grades return
+    ``None`` so the climb still counts as a route but carries no difficulty.
+    """
+    v = grade_value(grade)
+    if v is None:
+        return None
+    return max(0, min(VERMIN_MAX_ENUM, v + 1))
+
+
+def _add_raw_field(msg, field_id: int, base_type: BaseType, value: int) -> None:
+    """Attach a raw FIT field (by global number) to a fit-tool message."""
+    msg.fields.append(
+        Field(field_id=field_id, name=f"field_{field_id}", base_type=base_type,
+              size=0, growable=True)
+    )
+    msg.get_field(field_id).set_value(0, value)
+
+
+
+# The local_timestamp field (activity field 5) stores a local_date_time as raw
+# seconds since the FIT epoch (1989-12-31 UTC), unlike the normal timestamp
+# field which fit-tool auto-converts from Unix milliseconds.
+_FIT_EPOCH_OFFSET_MS = 631065600000
+
 
 def _ms(t: dt.datetime) -> int:
-    """Milliseconds since the Unix epoch, as fit-tool expects for time fields."""
+    """Milliseconds since the Unix epoch, as fit-tool expects for time fields.
+
+    For timezone-aware datetimes ``t.timestamp()`` yields the correct UTC epoch
+    regardless of the host's system timezone; for naive datetimes Python treats
+    the value as system-local time (the offline ``--from-csv`` path).
+    """
     return round(t.timestamp() * 1000)
+
+
+def _utc_offset_seconds(t: dt.datetime) -> int:
+    """UTC offset (seconds) for ``t``.
+
+    Uses the datetime's own offset when it is timezone-aware (so DST is handled
+    correctly, e.g. PDT -7h vs PST -8h); falls back to the system-local offset
+    for naive datetimes.
+    """
+    offset = t.utcoffset()
+    if offset is None:
+        offset = t.astimezone().utcoffset()
+    return int(offset.total_seconds()) if offset is not None else 0
+
 
 
 def _lap_bounds(session: Session) -> list[tuple[dt.datetime, dt.datetime]]:
@@ -149,6 +224,50 @@ def build_fit_bytes(
         )
         builder.add(lap)
 
+    # One `split` (CLIMB_ACTIVE) per climb, carrying that route's V-grade. Garmin
+    # Connect reads these to populate "Total Routes" (count of CLIMB_ACTIVE
+    # splits) and "Max Difficulty" (max climb_grade_value across the splits).
+    for i, ((split_start, split_end), ascent) in enumerate(
+        zip(bounds, session.ascents)
+    ):
+        split = SplitMessage()
+        split.message_index = i
+        split.split_type = SplitType.CLIMB_ACTIVE
+        split.start_time = _ms(split_start)
+        split_elapsed = (split_end - split_start).total_seconds()
+        split.total_elapsed_time = split_elapsed
+        split.total_timer_time = split_elapsed
+        split.total_calories = (
+            per_lap_cal + (metrics.calories - per_lap_cal * n_laps)
+            if i == n_laps - 1
+            else per_lap_cal
+        )
+        _add_raw_field(
+            split, FIELD_SPLIT_STATUS, BaseType.ENUM,
+            SPLIT_STATUS_CLIMB_COMPLETED if ascent.is_ascent else SPLIT_STATUS_CLIMB_ATTEMPTED,
+        )
+        _add_raw_field(
+            split, FIELD_CLIMB_SEND, BaseType.ENUM, 1 if ascent.is_ascent else 0
+        )
+        vermin = _vermin_enum(ascent.grade)
+        if vermin is not None:
+            _add_raw_field(
+                split, FIELD_CLIMB_GRADING_SCALE, BaseType.ENUM, GRADING_SCALE_VERMIN
+            )
+            _add_raw_field(
+                split, FIELD_CLIMB_GRADE_VALUE, BaseType.UINT32, vermin
+            )
+        builder.add(split)
+
+    # Aggregate summary so Garmin sees Total Routes = number of CLIMB_ACTIVE splits.
+    if n_laps:
+        split_summary = SplitSummaryMessage()
+        split_summary.split_type = SplitType.CLIMB_ACTIVE
+        split_summary.num_splits = n_laps
+        split_summary.total_timer_time = elapsed
+        split_summary.total_calories = metrics.calories
+        builder.add(split_summary)
+
     session_msg = SessionMessage()
     session_msg.message_index = 0
     session_msg.timestamp = _ms(end)
@@ -175,6 +294,12 @@ def build_fit_bytes(
     activity.type = Activity.MANUAL
     activity.event = Event.ACTIVITY
     activity.event_type = EventType.STOP
+    # local_timestamp is the local wall-clock of the activity, from which Garmin
+    # Connect derives the display offset. Encode it as the UTC instant shifted by
+    # the tz offset (DST-aware) in raw FIT-epoch seconds; without it Garmin shows
+    # the activity in UTC.
+    local_ms = _ms(end) + _utc_offset_seconds(end) * 1000
+    activity.local_timestamp = round((local_ms - _FIT_EPOCH_OFFSET_MS) / 1000)
     builder.add(activity)
 
     return bytes(builder.build().to_bytes())

@@ -46,6 +46,56 @@ def _import_garth():
     return garth
 
 
+# garth 0.8.0 sends its browser ``SSO_PAGE_HEADERS`` (a desktop User-Agent) on
+# the mobile login and MFA-verify POSTs. Garmin's mobile API expects the default
+# session UA (``GCM-iOS-...``) and rejects the browser UA with HTTP 429 (garth
+# PR #218 / issue #217). We strip those headers from just those two POSTs.
+_MOBILE_POST_PATHS = ("/mobile/api/login", "/mobile/api/mfa/verifyCode")
+_PATCH_FLAG = "_kgs_mobile_header_patched"
+
+
+def patch_garth_mobile_headers(garth_module: Any) -> bool:
+    """Remove browser SSO headers from garth's mobile login/MFA POSTs.
+
+    This runtime monkeypatch wraps ``garth.http.Client.request`` so that the
+    ``/mobile/api/login`` and ``/mobile/api/mfa/verifyCode`` POSTs no longer
+    carry garth's browser ``SSO_PAGE_HEADERS``; without them the client's
+    default mobile User-Agent is used and Garmin stops returning 429. The
+    browser headers are left untouched on the sign-in GET and the
+    ``/portal/sso/embed`` GET, where they are still required. Idempotent;
+    returns ``True`` if a patch is now in place.
+    """
+    http = getattr(garth_module, "http", None)
+    client_cls = getattr(http, "Client", None)
+    if client_cls is None:
+        return False
+    if getattr(client_cls, _PATCH_FLAG, False):
+        return True
+    try:
+        from garth.sso import SSO_PAGE_HEADERS  # noqa: PLC0415
+
+        browser_keys = set(SSO_PAGE_HEADERS)
+    except Exception:  # pragma: no cover - garth internals changed
+        browser_keys = {"User-Agent"}
+
+    original_request = client_cls.request
+
+    def request(self, method, subdomain, path, *args, **kwargs):
+        if method == "POST" and path in _MOBILE_POST_PATHS:
+            headers = kwargs.get("headers")
+            if headers:
+                headers = dict(headers)
+                for key in browser_keys:
+                    headers.pop(key, None)
+                kwargs["headers"] = headers
+        return original_request(self, method, subdomain, path, *args, **kwargs)
+
+    client_cls.request = request
+    client_cls._kgs_original_request = original_request
+    setattr(client_cls, _PATCH_FLAG, True)
+    return True
+
+
 def make_token(
     email: str,
     password: str,
@@ -60,6 +110,7 @@ def make_token(
     ``GARMIN_TOKEN`` secret; it contains OAuth tokens, not the password.
     """
     garth = garth_module or _import_garth()
+    patch_garth_mobile_headers(garth)
     if prompt_mfa is not None:
         garth.login(email, password, prompt_mfa=prompt_mfa)
     else:
