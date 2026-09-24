@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .metrics import SessionMetrics, compute_metrics
 from .models import Session
 from .summary import session_notes
 
@@ -39,8 +40,10 @@ def _append_version(parent: ET.Element, tag: str) -> None:
     ET.SubElement(version, f"{{{TCX_NS}}}BuildMinor").text = "0"
 
 
-def build_tcx_string(session: Session) -> str:
+def build_tcx_string(session: Session, metrics: SessionMetrics | None = None) -> str:
     """Build a TCX document (as a string) for one session."""
+    if metrics is None:
+        metrics = compute_metrics(session)
     start_iso = _iso(session.start)
     total_seconds = max((session.end - session.start).total_seconds(), 0.0)
 
@@ -61,11 +64,11 @@ def build_tcx_string(session: Session) -> str:
     lap.set("StartTime", start_iso)
     ET.SubElement(lap, f"{{{TCX_NS}}}TotalTimeSeconds").text = f"{total_seconds:.1f}"
     ET.SubElement(lap, f"{{{TCX_NS}}}DistanceMeters").text = "0.0"
-    ET.SubElement(lap, f"{{{TCX_NS}}}Calories").text = "0"
+    ET.SubElement(lap, f"{{{TCX_NS}}}Calories").text = str(metrics.calories)
     ET.SubElement(lap, f"{{{TCX_NS}}}Intensity").text = "Active"
     ET.SubElement(lap, f"{{{TCX_NS}}}TriggerMethod").text = "Manual"
 
-    ET.SubElement(activity, f"{{{TCX_NS}}}Notes").text = session_notes(session)
+    ET.SubElement(activity, f"{{{TCX_NS}}}Notes").text = session_notes(session, metrics)
 
     creator = ET.SubElement(activity, f"{{{TCX_NS}}}Creator")
     creator.set(f"{{{XSI_NS}}}type", "Device_t")
@@ -87,9 +90,9 @@ def build_tcx_string(session: Session) -> str:
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + xml + "\n"
 
 
-def write_tcx(session: Session, path: str | Path) -> Path:
+def write_tcx(session: Session, path: str | Path, metrics: SessionMetrics | None = None) -> Path:
     """Write a TCX file for the session and return its path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(build_tcx_string(session), encoding="utf-8")
+    path.write_text(build_tcx_string(session, metrics), encoding="utf-8")
     return path

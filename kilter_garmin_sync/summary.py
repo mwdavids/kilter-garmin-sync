@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from .metrics import SessionMetrics, compute_metrics
 from .models import Ascent, Session
 
 
@@ -80,10 +81,12 @@ def _counts_text(session: Session) -> str:
     return f"{label} ({', '.join(parts)})" if parts else label
 
 
-def session_title(session: Session) -> str:
+def session_title(session: Session, metrics: SessionMetrics | None = None) -> str:
     """A one-line title, e.g.
-    ``Kilter Board - 5 climbs (4 sends, 1 attempt), 40 deg, V4-V8, hardest V8``.
+    ``Kilter Board - 5 climbs (4 sends, 1 attempt), 40 deg, V4-V8, hardest V8, effort 32``.
     """
+    if metrics is None:
+        metrics = compute_metrics(session)
     parts = [f"Kilter Board \u2014 {_counts_text(session)}"]
     angles = _angles_text(session)
     if angles:
@@ -94,6 +97,7 @@ def session_title(session: Session) -> str:
     hardest = hardest_grade(session.sends) or hardest_grade(session.ascents)
     if hardest:
         parts.append(f"hardest {hardest}")
+    parts.append(f"effort {metrics.effort}")
     return ", ".join(parts)
 
 
@@ -116,13 +120,15 @@ def _entry_line(ascent: Ascent) -> str:
     return line
 
 
-def session_notes(session: Session) -> str:
+def session_notes(session: Session, metrics: SessionMetrics | None = None) -> str:
     """A multi-line description suitable for a TCX ``<Notes>`` field."""
+    if metrics is None:
+        metrics = compute_metrics(session)
     sends = session.sends
     attempts = session.attempts
 
     lines = [
-        session_title(session),
+        session_title(session, metrics),
         f"Date: {session.start:%Y-%m-%d}",
         f"Time: {session.start:%H:%M}\u2013{session.end:%H:%M} ({_duration_text(session)})",
     ]
@@ -133,6 +139,20 @@ def session_notes(session: Session) -> str:
     histogram = _histogram_text(sends)
     if histogram:
         lines.append(f"Sends by grade: {histogram}")
+
+    lines.append("")
+    lines.append(
+        f"Estimated calories: ~{metrics.calories} kcal "
+        f"(MET {metrics.met:g} \u00d7 {metrics.weight_lb:g} lb, no HR data \u2014 estimate)"
+    )
+    lines.append(f"Effort score: {metrics.effort} (grade-weighted volume)")
+    lines.append(
+        f"Estimated Training Effect: aerobic {metrics.aerobic_te:.1f}, "
+        f"anaerobic {metrics.anaerobic_te:.1f} (estimate, no HR)"
+    )
+    lines.append(
+        f"Suggested RPE: {metrics.rpe} \u2014 set this in Garmin Connect for training load"
+    )
     lines.append("")
 
     if sends:

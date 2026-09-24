@@ -119,6 +119,10 @@ use and testing with a legacy BoardLib CSV.
 | `--since`         | —               | Only export sessions on/after `YYYY-MM-DD`.                               |
 | `--min-duration`  | `10`            | Minimum session length in minutes (short sessions are padded).           |
 | `--ascents-only`  | off             | Exclude attempt-only entries (keep only sends).                          |
+| `--weight-lb`     | `180`           | Body weight (lb) for the MET-based calorie estimate.                     |
+| `--met`           | `8.0`           | MET intensity for the calorie estimate (vigorous bouldering).            |
+| `--upload`        | off             | After writing, auto-upload the files to Garmin Connect (see below).      |
+| `--upload-ledger` | `data/uploaded.json` | Ledger of already-uploaded files so re-uploads are skipped.         |
 | `--overwrite`     | off             | Regenerate files even if they already exist or are in the ledger.        |
 | `--ledger PATH`   | `data/exported.json` | Ledger of already-exported days; re-runs skip them.                 |
 | `--no-ledger`     | off             | Ignore the ledger entirely (read nor write).                             |
@@ -153,6 +157,74 @@ a `new` day whose file already exists in `--out` is also skipped. Use
 In the cloud (GitHub Actions) the ledger is carried across runs with
 `actions/cache`, so a fresh runner still skips days exported by earlier runs.
 
+## Effort metrics (no heart rate)
+
+Kilter logs carry **no heart rate**, so Garmin's automatic Training Load /
+Training Effect can't be truly measured. Rather than fabricate a fake HR stream
+(which would corrupt Garmin's HRV and resting-HR baselines), the tool derives a
+few **honest, clearly-labelled estimates** from the real logged data and writes
+them into each activity:
+
+- **Calories** — MET-based: `MET (8.0) × body_kg × hours`. Tune with
+  `--weight-lb` (default 180) and `--met`. Written to the FIT session/laps and
+  the TCX `<Calories>`.
+- **Effort score** — grade-weighted volume: each send counts `V+1` (a V5 = 6),
+  attempts count half, unrated climbs count a baseline of 1. Shown in the title
+  and notes.
+- **Suggested RPE (1–10)** — derived from the effort score. Because there's no
+  HR, **RPE is the real lever** for training load on these activities: after
+  importing, set the activity's *Perceived Exertion* / *Feel* in Garmin Connect
+  to this value (or your own) so it contributes to training load sensibly. The
+  notes spell this out: `Suggested RPE: 7 — set this in Garmin Connect for
+  training load`.
+- **Estimated Training Effect** — rough aerobic/anaerobic numbers on Garmin's
+  0.0–5.0 scale (anaerobic-weighted, since bouldering is anaerobic). Stored in
+  the FIT session as `total_training_effect` / `total_anaerobic_training_effect`.
+- **Per-climb laps** — one FIT *lap* per logged climb. Since Kilter doesn't
+  record per-climb durations, lap timing is estimated by distributing the
+  session window evenly across the climbs (documented in `fit_writer.py`).
+
+All of these are **estimates**, labelled as such in the notes. The only measured
+facts are the timestamps, grades, angles, and send/attempt flags from Kilter.
+
+## Auto-upload to Garmin Connect (optional)
+
+By default the tool only *generates files* and you import them manually. If you'd
+rather have them pushed to Garmin Connect automatically, use `--upload`, which
+uploads via [`garth`](https://github.com/matin/garth). (garth is in
+maintenance/deprecated but still works against Garmin's upload service; it's an
+optional dependency, only imported when you use `--upload`.)
+
+Garmin accounts often require **MFA**, which can't be answered on a headless CI
+runner. So auth is **token-based**: log in **once** interactively to mint a
+reusable token, then store it as a secret.
+
+1. **Mint a token once (locally):**
+   ```bash
+   kilter-garmin-sync garmin-login
+   # prompts for your Garmin email, password, and MFA code if required
+   ```
+   It prints a base64 token blob. (You can also set `GARMIN_EMAIL` /
+   `GARMIN_PASSWORD` env vars to skip the prompts.)
+2. **Save the token** as the `GARMIN_TOKEN` environment variable locally, or as a
+   repo secret named `GARMIN_TOKEN` for CI (**Settings → Secrets and variables →
+   Actions**). The token contains OAuth session tokens, **not** your password —
+   never commit it.
+3. **Upload:**
+   ```bash
+   # local: resumes from GARMIN_TOKEN, no MFA needed
+   kilter-garmin-sync --upload
+   ```
+   In GitHub Actions, tick the **`upload`** input when running the workflow (it
+   reads the `GARMIN_TOKEN` secret).
+
+Duplicate protection for uploads is twofold: Garmin rejects a re-upload of the
+same file with HTTP **409**, which the tool treats as "already uploaded"; and a
+local **upload ledger** (`data/uploaded.json`, cached across CI runs) records
+uploaded filenames so repeat runs skip the network call entirely. If neither a
+token nor email/password is available, `--upload` prints a clear message and the
+generated files are still written for manual import.
+
 ## Run it in the cloud (GitHub Actions)
 
 If your local network blocks or throttles the Kilter Grips backend
@@ -174,6 +246,9 @@ the export in the cloud instead and download the files.
    - `since` — `YYYY-MM-DD` to only export sessions on or after that date.
    - `sub_sport` — `bouldering` (default) or `indoor_climbing` (FIT only).
    - `tz` — IANA timezone (e.g. `America/Los_Angeles`) for local-day grouping.
+   - `upload` — also push the generated files to Garmin Connect (requires a
+     `GARMIN_TOKEN` secret; see [Auto-upload](#auto-upload-to-garmin-connect-optional)).
+   - `weight_lb` — body weight in lb for the calorie estimate (optional).
 3. **Download the artifact.** When the run finishes, open it and download the
    **`kilter-activities`** artifact (a zip of `out/**`). Unzip it to get one
    `.fit`/`.tcx` per session. Thanks to the ledger (cached across runs), a later
@@ -204,8 +279,10 @@ Notes on what you'll see:
   limitations), angles, per-climb grades, sends vs attempts, the **hardest
   send**, and a **per-grade send count** (e.g. `V8×1, V6×1, V4×1`), plus the time
   window and duration.
-- Either way there is **no heart rate, calories, or distance** — board sessions
-  don't record them.
+- Either way there is **no heart rate** or GPS/distance — board sessions don't
+  record them. Calories, effort, and Training Effect are **estimates** derived
+  from grades, volume, and duration (see [Effort metrics](#effort-metrics-no-heart-rate)),
+  not measured values.
 
 ## FIT vs TCX — which to use?
 
@@ -232,8 +309,10 @@ python -m pytest
 
 The tests use a small fixture logbook (`tests/fixtures/sample_logbook.csv`), so
 they run **without any Kilter/Garmin credentials**. They cover session grouping,
-the summary text, and file generation — including parsing every generated FIT
-back with the Garmin SDK and re-parsing every TCX as XML to confirm validity.
+the effort metrics math, the summary text, and file generation — including
+parsing every generated FIT back with the Garmin SDK and re-parsing every TCX as
+XML to confirm validity. The Garmin upload path is tested with a fully mocked
+`garth` client, so no network calls are made.
 
 ## Project layout
 
@@ -247,9 +326,11 @@ kilter_garmin_sync/
   models.py           Ascent and Session data models
   sessions.py         group ascents into one session per calendar day
   ledger.py           export ledger: skip already-exported session days
+  metrics.py          HR-free effort estimates: calories, effort, RPE, TE
   summary.py          human-readable title + notes
-  fit_writer.py       FIT generation (fit-tool)
+  fit_writer.py       FIT generation (fit-tool): per-climb laps, calories, TE
   tcx_writer.py       TCX generation
+  garmin_upload.py    optional auto-upload to Garmin Connect (garth)
 tests/                pytest suite + fixtures (no credentials needed)
 ```
 

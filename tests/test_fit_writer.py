@@ -70,3 +70,46 @@ def test_write_fit_creates_file(tmp_path):
     assert out.exists() and out.stat().st_size > 0
     messages, errors = _decode(out.read_bytes())
     assert errors == []
+
+
+def _multi_climb_session():
+    ascents = [
+        make_ascent(when=datetime(2026, 3, 1, 9, 0), grade="V4"),
+        make_ascent(when=datetime(2026, 3, 1, 9, 30), grade="V5"),
+        make_ascent(when=datetime(2026, 3, 1, 10, 0), grade="V6"),
+        make_ascent(when=datetime(2026, 3, 1, 11, 0), grade="V3"),
+    ]
+    return group_sessions(ascents, min_duration_minutes=1)[0]
+
+
+def test_fit_has_one_lap_per_climb():
+    session = _multi_climb_session()
+    messages, errors = _decode(build_fit_bytes(session))
+    assert errors == []
+    assert len(messages["lap_mesgs"]) == len(session.ascents)
+    assert messages["session_mesgs"][0]["num_laps"] == len(session.ascents)
+
+
+def test_fit_has_calories_and_training_effect():
+    from kilter_garmin_sync.metrics import compute_metrics
+
+    session = _multi_climb_session()
+    metrics = compute_metrics(session)
+    messages, _ = _decode(build_fit_bytes(session, metrics=metrics))
+    session_msg = messages["session_mesgs"][0]
+    assert session_msg["total_calories"] == metrics.calories
+    assert session_msg["total_training_effect"] == pytest.approx(metrics.aerobic_te)
+    assert session_msg["total_anaerobic_training_effect"] == pytest.approx(
+        metrics.anaerobic_te
+    )
+    # Per-lap calories sum back to the session total.
+    lap_calories = sum(lap.get("total_calories", 0) for lap in messages["lap_mesgs"])
+    assert lap_calories == metrics.calories
+
+
+def test_fit_laps_carry_sub_sport():
+    messages, _ = _decode(
+        build_fit_bytes(_multi_climb_session(), sub_sport="indoor_climbing")
+    )
+    for lap in messages["lap_mesgs"]:
+        assert lap["sub_sport"] == "indoor_climbing"
