@@ -329,6 +329,25 @@ the export in the cloud instead and download the files.
    duplicates.
 4. **Import to Garmin** using the steps in the next section.
 
+### Nightly auto-upload
+
+The workflow also runs **automatically every night** (cron `0 13 * * *` =
+13:00 UTC, ~06:00 Pacific). A scheduled run always exports **FIT bouldering** in
+`America/Los_Angeles` and **auto-uploads** the results to Garmin Connect using
+the `GARMIN_TOKEN` secret — no button-press needed.
+
+- **Scope / de-dup floor.** To avoid re-touching sessions you already imported,
+  scheduled uploads are limited to sessions **on or after `UPLOAD_SINCE`**
+  (passed as `--since`). It defaults to **`2026-09-24`** and is overridable with
+  a repo **Variable** named `UPLOAD_SINCE` (**Settings → Secrets and variables →
+  Actions → Variables → New repository variable**, format `YYYY-MM-DD`). A manual
+  run uses its own `since` input when you provide one, otherwise the same floor.
+- **Skip already-uploaded files.** The upload ledger (`data/uploaded.json`) is
+  cached across runs (date-based key, so it persists and keeps growing night to
+  night), so repeated nightly runs skip files already sent. Garmin also rejects
+  any true duplicate with HTTP 409, so a re-upload never creates a second
+  activity even if the ledger is cold.
+
 Generated activity files and the Kilter database are produced only inside the
 runner and uploaded as an artifact — they are **not** committed to the repo.
 

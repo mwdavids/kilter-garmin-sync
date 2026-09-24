@@ -22,6 +22,7 @@ dependencies = [
 dev = [
     "pytest>=7.4",
     "garmin-fit-sdk>=21.115",
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]
