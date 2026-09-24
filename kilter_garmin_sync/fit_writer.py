@@ -34,6 +34,7 @@ from fit_tool.profile.profile_type import (
     SubSport,
 )
 
+from .metrics import SessionMetrics, compute_metrics
 from .models import Session
 
 SUB_SPORTS = {
@@ -47,13 +48,45 @@ def _ms(t: dt.datetime) -> int:
     return round(t.timestamp() * 1000)
 
 
-def build_fit_bytes(session: Session, *, sub_sport: str = "bouldering") -> bytes:
-    """Build a FIT activity file (as bytes) for one session."""
+def _lap_bounds(session: Session) -> list[tuple[dt.datetime, dt.datetime]]:
+    """One (start, end) window per climb.
+
+    Kilter does not record per-climb durations, so when precise per-climb timing
+    isn't available we estimate by distributing the session window evenly across
+    the climbs, in chronological order. The result is one lap per logged climb.
+    """
+    n = len(session.ascents)
+    if n == 0:
+        return []
+    total = (session.end - session.start).total_seconds()
+    step = total / n
+    bounds = []
+    for i in range(n):
+        lap_start = session.start + dt.timedelta(seconds=step * i)
+        lap_end = session.end if i == n - 1 else session.start + dt.timedelta(seconds=step * (i + 1))
+        bounds.append((lap_start, lap_end))
+    return bounds
+
+
+def build_fit_bytes(
+    session: Session,
+    *,
+    sub_sport: str = "bouldering",
+    metrics: SessionMetrics | None = None,
+) -> bytes:
+    """Build a FIT activity file (as bytes) for one session.
+
+    The file is enriched with MET-based ``total_calories``, estimated aerobic /
+    anaerobic Training Effect, and one ``lap`` per logged climb. There is still
+    no HR/GPS data (Kilter records none).
+    """
     if sub_sport not in SUB_SPORTS:
         raise ValueError(
             f"Unknown sub_sport {sub_sport!r}; expected one of {sorted(SUB_SPORTS)}"
         )
     sub = SUB_SPORTS[sub_sport]
+    if metrics is None:
+        metrics = compute_metrics(session)
 
     start, end = session.start, session.end
     elapsed = (end - start).total_seconds()
@@ -74,9 +107,12 @@ def build_fit_bytes(session: Session, *, sub_sport: str = "bouldering") -> bytes
     start_event.timestamp = _ms(start)
     builder.add(start_event)
 
-    # Minimal records (timestamp only, no HR/GPS) bracket the activity so
-    # importers reliably accept a non-empty timeline.
-    for t in (start, end):
+    bounds = _lap_bounds(session)
+
+    # A record at each lap boundary (timestamp only, no HR/GPS) gives importers a
+    # non-empty timeline that spans the whole session.
+    record_times = [start] + [b[1] for b in bounds]
+    for t in record_times:
         record = RecordMessage()
         record.timestamp = _ms(t)
         builder.add(record)
@@ -87,18 +123,31 @@ def build_fit_bytes(session: Session, *, sub_sport: str = "bouldering") -> bytes
     stop_event.timestamp = _ms(end)
     builder.add(stop_event)
 
-    lap = LapMessage()
-    lap.message_index = 0
-    lap.timestamp = _ms(end)
-    lap.start_time = _ms(start)
-    lap.total_elapsed_time = elapsed
-    lap.total_timer_time = elapsed
-    lap.sport = Sport.ROCK_CLIMBING
-    lap.sub_sport = sub
-    lap.event = Event.LAP
-    lap.event_type = EventType.STOP
-    lap.lap_trigger = LapTrigger.SESSION_END
-    builder.add(lap)
+    # One lap per climb. Calories are distributed evenly across laps (remainder
+    # on the last), matching the even time distribution.
+    n_laps = len(bounds)
+    per_lap_cal = metrics.calories // n_laps if n_laps else 0
+    for i, (lap_start, lap_end) in enumerate(bounds):
+        lap = LapMessage()
+        lap.message_index = i
+        lap.timestamp = _ms(lap_end)
+        lap.start_time = _ms(lap_start)
+        lap_elapsed = (lap_end - lap_start).total_seconds()
+        lap.total_elapsed_time = lap_elapsed
+        lap.total_timer_time = lap_elapsed
+        lap.sport = Sport.ROCK_CLIMBING
+        lap.sub_sport = sub
+        lap.event = Event.LAP
+        lap.event_type = EventType.STOP
+        lap.lap_trigger = (
+            LapTrigger.SESSION_END if i == n_laps - 1 else LapTrigger.MANUAL
+        )
+        lap.total_calories = (
+            per_lap_cal + (metrics.calories - per_lap_cal * n_laps)
+            if i == n_laps - 1
+            else per_lap_cal
+        )
+        builder.add(lap)
 
     session_msg = SessionMessage()
     session_msg.message_index = 0
@@ -109,12 +158,14 @@ def build_fit_bytes(session: Session, *, sub_sport: str = "bouldering") -> bytes
     session_msg.sport = Sport.ROCK_CLIMBING
     session_msg.sub_sport = sub
     session_msg.first_lap_index = 0
-    session_msg.num_laps = 1
+    session_msg.num_laps = max(1, n_laps)
     session_msg.event = Event.SESSION
     session_msg.event_type = EventType.STOP
     session_msg.trigger = SessionTrigger.ACTIVITY_END
     session_msg.total_distance = 0.0
-    session_msg.total_calories = 0
+    session_msg.total_calories = metrics.calories
+    session_msg.total_training_effect = metrics.aerobic_te
+    session_msg.total_anaerobic_training_effect = metrics.anaerobic_te
     builder.add(session_msg)
 
     activity = ActivityMessage()
@@ -129,9 +180,15 @@ def build_fit_bytes(session: Session, *, sub_sport: str = "bouldering") -> bytes
     return bytes(builder.build().to_bytes())
 
 
-def write_fit(session: Session, path: str | Path, *, sub_sport: str = "bouldering") -> Path:
+def write_fit(
+    session: Session,
+    path: str | Path,
+    *,
+    sub_sport: str = "bouldering",
+    metrics: SessionMetrics | None = None,
+) -> Path:
     """Write a FIT file for the session and return its path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(build_fit_bytes(session, sub_sport=sub_sport))
+    path.write_bytes(build_fit_bytes(session, sub_sport=sub_sport, metrics=metrics))
     return path

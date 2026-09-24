@@ -14,6 +14,8 @@ dependencies = [
     "fit-tool>=0.9.13",
     # BoardLib imports PIL (Pillow) at module load but doesn't declare it.
     "Pillow>=9.0",
+    # Optional auto-upload to Garmin Connect (--upload / garmin-login).
+    "garth>=0.4",
 ]
 
 [project.optional-dependencies]

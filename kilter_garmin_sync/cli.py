@@ -13,6 +13,7 @@ from .boardlib_source import load_csv
 from .fit_writer import SUB_SPORTS, write_fit
 from .kilter_source import fetch_ascents
 from .ledger import Ledger, session_fingerprint
+from .metrics import DEFAULT_MET, DEFAULT_WEIGHT_LB, compute_metrics
 from .models import Session
 from .sessions import group_sessions
 from .summary import session_notes, session_title
@@ -139,6 +140,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exclude attempt-only entries (keep only sends).",
     )
 
+    metrics = parser.add_argument_group("effort metrics (HR-free estimates)")
+    metrics.add_argument(
+        "--weight-lb",
+        type=float,
+        default=DEFAULT_WEIGHT_LB,
+        metavar="LB",
+        help=f"Body weight in pounds, used for calorie estimates (default: {DEFAULT_WEIGHT_LB:g}).",
+    )
+    metrics.add_argument(
+        "--met",
+        type=float,
+        default=DEFAULT_MET,
+        metavar="MET",
+        help=f"MET intensity for calorie estimates (default: {DEFAULT_MET:g}, vigorous bouldering).",
+    )
+
+    upload = parser.add_argument_group("garmin auto-upload (optional)")
+    upload.add_argument(
+        "--upload",
+        action="store_true",
+        help=(
+            "After generating files, upload them to Garmin Connect via garth. "
+            "Requires GARMIN_TOKEN (from 'kilter-garmin-sync garmin-login') or "
+            "GARMIN_EMAIL/GARMIN_PASSWORD. Duplicates are skipped."
+        ),
+    )
+    upload.add_argument(
+        "--upload-ledger",
+        default="data/uploaded.json",
+        metavar="PATH",
+        help="Path to the upload ledger of already-uploaded files (default: data/uploaded.json).",
+    )
+
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output.")
     return parser
 
@@ -191,9 +225,73 @@ def _load_ascents(args: argparse.Namespace, parser: argparse.ArgumentParser):
     )
 
 
+def _run_garmin_login(argv: list[str]) -> int:
+    """Handle the ``garmin-login`` subcommand: mint a reusable Garmin token."""
+    import getpass
+
+    from .garmin_upload import GarminAuthError, make_token
+
+    sub = argparse.ArgumentParser(
+        prog="kilter-garmin-sync garmin-login",
+        description=(
+            "Log in to Garmin Connect once (handling any MFA prompt) and print a "
+            "base64 token. Save it as the GARMIN_TOKEN env var / CI secret so "
+            "later --upload runs authenticate without a password or MFA."
+        ),
+    )
+    sub.add_argument(
+        "--email",
+        default=os.environ.get("GARMIN_EMAIL"),
+        help="Garmin Connect email (or set GARMIN_EMAIL).",
+    )
+    args = sub.parse_args(argv)
+
+    email = args.email or input("Garmin email: ").strip()
+    password = os.environ.get("GARMIN_PASSWORD") or getpass.getpass("Garmin password: ")
+
+    def prompt_mfa() -> str:
+        return input("Garmin MFA code: ").strip()
+
+    try:
+        token = make_token(email, password, prompt_mfa=prompt_mfa)
+    except GarminAuthError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print("\nLogin successful. Save the line below as the GARMIN_TOKEN secret:\n")
+    print(token)
+    print(
+        "\nStore it in CI as a repository secret named GARMIN_TOKEN "
+        "(Settings -> Secrets and variables -> Actions). Do not commit it.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _do_upload(args: argparse.Namespace, written_paths: list[Path]) -> None:
+    from .garmin_upload import GarminAuthError, UploadLedger, upload_files
+
+    if not written_paths:
+        print("No new files to upload.")
+        return
+    ledger = UploadLedger.load(Path(args.upload_ledger))
+    try:
+        results = upload_files(written_paths, ledger=ledger)
+    except GarminAuthError as exc:
+        print(f"upload skipped: {exc}", file=sys.stderr)
+        return
+    for result in results:
+        suffix = f" (activity {result.activity_id})" if result.activity_id else ""
+        print(f"upload {result.status}: {result.path.name}{suffix}")
+
+
 def main(argv: list[str] | None = None) -> int:
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list and args_list[0] == "garmin-login":
+        return _run_garmin_login(args_list[1:])
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_list)
 
     ascents = _load_ascents(args, parser)
     if args.verbose:
@@ -218,17 +316,19 @@ def main(argv: list[str] | None = None) -> int:
     ledger = Ledger.load(ledger_path) if use_ledger else None
 
     written = skipped = 0
+    written_paths: list[Path] = []
     for i, session in enumerate(sessions):
         target = out_dir / filenames[i]
         day_key = f"{session.day:%Y-%m-%d}"
         fingerprint = session_fingerprint(session)
+        metrics = compute_metrics(session, weight_lb=args.weight_lb, met=args.met)
 
         if args.dry_run:
             status = ledger.status(day_key, fingerprint) if ledger else "new"
             tag = "" if status == "new" else f"  [{status}]"
-            print(f"[dry-run] {target}  |  {session_title(session)}{tag}")
+            print(f"[dry-run] {target}  |  {session_title(session, metrics)}{tag}")
             if args.verbose:
-                for line in session_notes(session).splitlines():
+                for line in session_notes(session, metrics).splitlines():
                     print(f"    {line}")
             continue
 
@@ -253,18 +353,21 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
         if args.format == "fit":
-            write_fit(session, target, sub_sport=args.sub_sport)
+            write_fit(session, target, sub_sport=args.sub_sport, metrics=metrics)
         else:
-            write_tcx(session, target)
+            write_tcx(session, target, metrics)
         written += 1
+        written_paths.append(target)
         if ledger is not None:
             ledger.record(day_key, fingerprint, filenames[i], args.format)
-        print(f"wrote {target}  ({session_title(session)})")
+        print(f"wrote {target}  ({session_title(session, metrics)})")
 
     if not args.dry_run:
         if ledger is not None:
             ledger.save(ledger_path)
         print(f"\nDone: {written} written, {skipped} skipped, {len(sessions)} sessions total.")
+        if args.upload:
+            _do_upload(args, written_paths)
     return 0
 
 

@@ -76,3 +76,34 @@ def test_cli_errors_without_source(capsys):
 
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_cli_upload_invokes_upload(tmp_path, fixture_csv, monkeypatch, capsys):
+    out = tmp_path / "out"
+    calls = {}
+
+    def fake_upload_files(paths, **kwargs):
+        from kilter_garmin_sync.garmin_upload import UploadResult
+
+        calls["paths"] = list(paths)
+        return [UploadResult(p, "uploaded", 999) for p in paths]
+
+    monkeypatch.setattr(
+        "kilter_garmin_sync.garmin_upload.upload_files", fake_upload_files
+    )
+    rc = main(["--from-csv", str(fixture_csv), "--out", str(out), "--upload"])
+    assert rc == 0
+    assert len(calls["paths"]) == 3
+    assert "upload uploaded:" in capsys.readouterr().out
+
+
+def test_cli_garmin_login_subcommand(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "kilter_garmin_sync.garmin_upload.make_token",
+        lambda email, password, **kw: "TOKEN123",
+    )
+    monkeypatch.setenv("GARMIN_EMAIL", "me@example.com")
+    monkeypatch.setenv("GARMIN_PASSWORD", "secret")
+    rc = main(["garmin-login"])
+    assert rc == 0
+    assert "TOKEN123" in capsys.readouterr().out

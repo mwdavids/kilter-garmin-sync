@@ -44,6 +44,15 @@ on:
         type: string
         required: false
         default: ""
+      upload:
+        description: "[export] Also auto-upload to Garmin Connect (needs GARMIN_TOKEN secret)"
+        type: boolean
+        default: false
+      weight_lb:
+        description: "[export] Body weight in lb for calorie estimates (optional)"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -87,11 +96,13 @@ jobs:
         if: ${{ inputs.mode == 'export' }}
         uses: actions/cache@v4
         with:
-          # Carries the de-duplication ledger across runs so already-exported
-          # session days are skipped even on a fresh runner. The run-id key
-          # always misses (forcing a fresh save), while restore-keys pulls the
-          # most recent previous ledger.
-          path: data/exported.json
+          # Carries the de-duplication ledgers across runs so already-exported
+          # session days (and already-uploaded files) are skipped even on a
+          # fresh runner. The run-id key always misses (forcing a fresh save),
+          # while restore-keys pulls the most recent previous ledger.
+          path: |
+            data/exported.json
+            data/uploaded.json
           key: kilter-ledger-${{ github.run_id }}
           restore-keys: |
             kilter-ledger-
@@ -101,6 +112,9 @@ jobs:
         env:
           KILTER_USERNAME: ${{ secrets.KILTER_USERNAME }}
           KILTER_PASSWORD: ${{ secrets.KILTER_PASSWORD }}
+          # Only used when 'upload' is enabled. Mint it once locally with
+          # 'kilter-garmin-sync garmin-login' and store it as this secret.
+          GARMIN_TOKEN: ${{ secrets.GARMIN_TOKEN }}
         run: |
           args=(--format "${{ inputs.format }}" --sub-sport "${{ inputs.sub_sport }}" --out out)
           if [ -n "${{ inputs.since }}" ]; then
@@ -108,6 +122,12 @@ jobs:
           fi
           if [ -n "${{ inputs.tz }}" ]; then
             args+=(--tz "${{ inputs.tz }}")
+          fi
+          if [ -n "${{ inputs.weight_lb }}" ]; then
+            args+=(--weight-lb "${{ inputs.weight_lb }}")
+          fi
+          if [ "${{ inputs.upload }}" = "true" ]; then
+            args+=(--upload)
           fi
           kilter-garmin-sync "${args[@]}" --verbose
 
