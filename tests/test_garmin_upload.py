@@ -131,16 +131,19 @@ def test_upload_file_429_honours_retry_after(tmp_path):
     assert delays == [12.0]
 
 
-def test_upload_file_429_gives_up_after_max_retries(tmp_path):
+def test_upload_file_429_pending_after_max_retries(tmp_path):
     client = _FlakyClient(99, _http_429())
-    with pytest.raises(Exception, match="429"):
-        upload_file(
-            client,
-            _fit(tmp_path),
-            confirm=False,
-            max_retries=3,
-            sleeper=lambda *_: None,
-        )
+    result = upload_file(
+        client,
+        _fit(tmp_path),
+        confirm=False,
+        max_retries=3,
+        sleeper=lambda *_: None,
+    )
+    # A sustained throttle is non-fatal: report pending (ok=False) so the run
+    # does not fail and the file is retried on the next run.
+    assert result.status == "pending"
+    assert result.ok is False
     assert client.upload_calls == 4  # initial try + 3 retries
 
 

@@ -302,7 +302,9 @@ def upload_file(
     A Garmin ``429 Too Many Requests`` (typically thrown while garth refreshes
     its OAuth token) is retried up to ``max_retries`` times with exponential
     backoff, honouring a ``Retry-After`` header when present. If it is still
-    throttled after the last attempt the 429 propagates so the run surfaces it.
+    throttled after the last attempt we return a ``"pending"`` result (ok=False)
+    rather than raising, so a sustained server-side throttle does not fail the
+    whole run: the file is not recorded in the ledger and the next run retries.
     """
     path = Path(path)
     before = _recent_activity_ids(client) if confirm else set()
@@ -315,7 +317,9 @@ def upload_file(
         except Exception as exc:  # noqa: BLE001 - inspect for duplicate/throttle
             if _looks_like_conflict(exc):
                 return UploadResult(path, "duplicate")
-            if _looks_like_rate_limit(exc) and attempt < max_retries:
+            if _looks_like_rate_limit(exc):
+                if attempt >= max_retries:
+                    return UploadResult(path, "pending")
                 delay = _retry_after_seconds(exc)
                 if delay is None:
                     delay = retry_backoff * (2**attempt)
