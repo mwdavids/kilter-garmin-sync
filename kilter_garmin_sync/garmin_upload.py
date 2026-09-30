@@ -287,6 +287,8 @@ def upload_file(
     confirm: bool = True,
     confirm_timeout: float = 180.0,
     confirm_poll_interval: float = 5.0,
+    max_retries: int = 4,
+    retry_backoff: float = 5.0,
     sleeper: Callable[[float], Any] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> UploadResult:
@@ -296,16 +298,31 @@ def upload_file(
     async case), we poll the activity list for up to ``confirm_timeout`` seconds
     to confirm a new activity materialized. If it doesn't, we return a
     ``"pending"`` result (ok=False) so the caller does not record it and retries.
+
+    A Garmin ``429 Too Many Requests`` (typically thrown while garth refreshes
+    its OAuth token) is retried up to ``max_retries`` times with exponential
+    backoff, honouring a ``Retry-After`` header when present. If it is still
+    throttled after the last attempt the 429 propagates so the run surfaces it.
     """
     path = Path(path)
     before = _recent_activity_ids(client) if confirm else set()
-    try:
-        with path.open("rb") as fp:
-            resp = client.upload(fp)
-    except Exception as exc:  # noqa: BLE001 - inspect for a duplicate signal
-        if _looks_like_conflict(exc):
-            return UploadResult(path, "duplicate")
-        raise
+    attempt = 0
+    while True:
+        try:
+            with path.open("rb") as fp:
+                resp = client.upload(fp)
+            break
+        except Exception as exc:  # noqa: BLE001 - inspect for duplicate/throttle
+            if _looks_like_conflict(exc):
+                return UploadResult(path, "duplicate")
+            if _looks_like_rate_limit(exc) and attempt < max_retries:
+                delay = _retry_after_seconds(exc)
+                if delay is None:
+                    delay = retry_backoff * (2**attempt)
+                attempt += 1
+                sleeper(delay)
+                continue
+            raise
     parsed = _parse_upload_response(resp) if isinstance(resp, dict) else None
     if parsed is not None:
         return UploadResult(path, parsed.status, parsed.activity_id)
@@ -330,6 +347,29 @@ def _looks_like_conflict(exc: Exception) -> bool:
     if status == 409:
         return True
     return "409" in str(exc) or "conflict" in str(exc).lower()
+
+
+def _looks_like_rate_limit(exc: Exception) -> bool:
+    """True if the exception looks like an HTTP 429 (Garmin throttling)."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 429:
+        return True
+    text = str(exc).lower()
+    return "429" in text or "too many requests" in text
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Return the ``Retry-After`` delay in seconds from a response, if numeric."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if not headers:
+        return None
+    value = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def upload_files(

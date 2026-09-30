@@ -76,6 +76,74 @@ def test_upload_file_duplicate_via_409(tmp_path):
     assert result.status == "duplicate"
 
 
+class _FlakyClient(FakeClient):
+    """Raises a 429 for the first ``fail_times`` uploads, then succeeds."""
+
+    def __init__(self, fail_times, exc, success_resp=None):
+        super().__init__(responses=[success_resp] if success_resp else None)
+        self._fail_times = fail_times
+        self._exc = exc
+        self.upload_calls = 0
+
+    def upload(self, fp):
+        self.upload_calls += 1
+        if self.upload_calls <= self._fail_times:
+            raise self._exc
+        return super().upload(fp)
+
+
+class _Resp429:
+    status_code = 429
+
+    def __init__(self, headers=None):
+        self.headers = headers or {}
+
+
+def _http_429(headers=None):
+    exc = Exception("429 Client Error: Too Many Requests for url: ...")
+    exc.response = _Resp429(headers)
+    return exc
+
+
+def test_upload_file_retries_then_succeeds_on_429(tmp_path):
+    client = _FlakyClient(2, _http_429(), success_resp={
+        "detailedImportResult": {"successes": [{"internalId": 77}]}
+    })
+    delays = []
+    result = upload_file(
+        client,
+        _fit(tmp_path),
+        confirm=False,
+        sleeper=delays.append,
+    )
+    assert result.status == "uploaded"
+    assert result.activity_id == 77
+    assert client.upload_calls == 3  # two 429s then success
+    assert len(delays) == 2  # slept once per retry
+
+
+def test_upload_file_429_honours_retry_after(tmp_path):
+    client = _FlakyClient(1, _http_429({"Retry-After": "12"}), success_resp={
+        "detailedImportResult": {"successes": [{"internalId": 1}]}
+    })
+    delays = []
+    upload_file(client, _fit(tmp_path), confirm=False, sleeper=delays.append)
+    assert delays == [12.0]
+
+
+def test_upload_file_429_gives_up_after_max_retries(tmp_path):
+    client = _FlakyClient(99, _http_429())
+    with pytest.raises(Exception, match="429"):
+        upload_file(
+            client,
+            _fit(tmp_path),
+            confirm=False,
+            max_retries=3,
+            sleeper=lambda *_: None,
+        )
+    assert client.upload_calls == 4  # initial try + 3 retries
+
+
 def test_upload_file_duplicate_via_response(tmp_path):
     resp = {
         "detailedImportResult": {
