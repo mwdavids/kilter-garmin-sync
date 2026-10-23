@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
+import pytest
 from garmin_fit_sdk import Decoder, Stream
 
 from kilter_garmin_sync.cli import main
@@ -107,3 +108,44 @@ def test_cli_garmin_login_subcommand(monkeypatch, capsys):
     rc = main(["garmin-login"])
     assert rc == 0
     assert "TOKEN123" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fresh_output", [False, True])
+def test_cli_retries_pending_upload_after_export(
+    tmp_path, fixture_csv, monkeypatch, capsys, fresh_output
+):
+    from kilter_garmin_sync.garmin_upload import UploadLedger, UploadResult
+
+    out = tmp_path / "out"
+    args = [
+        "--from-csv", str(fixture_csv),
+        "--out", str(out),
+        "--ledger", str(tmp_path / "exported.json"),
+        "--upload-ledger", str(tmp_path / "uploaded.json"),
+        "--upload",
+    ]
+    calls = []
+
+    def fake_upload_files(paths, *, ledger):
+        calls.append(list(paths))
+        if len(calls) == 1:
+            return [UploadResult(p, "pending", reason="HTTP 429") for p in paths]
+        for path in paths:
+            ledger.add(path.name)
+        ledger.save()
+        return [UploadResult(p, "uploaded", 999) for p in paths]
+
+    monkeypatch.setattr("kilter_garmin_sync.garmin_upload.upload_files", fake_upload_files)
+    assert main(args) == 0
+    assert "HTTP 429" in capsys.readouterr().err
+    if fresh_output:
+        args[args.index("--out") + 1] = str(tmp_path / "fresh-out")
+    assert main(args) == 0
+    assert len(calls) == 2
+    assert len(calls[1]) == 3
+    assert all(p.is_file() for p in calls[1])
+    ledger = UploadLedger.load(tmp_path / "uploaded.json")
+    assert all(ledger.contains(p.name) for p in calls[1])
+    assert main(args) == 0
+    assert len(calls) == 2
+    assert "No new files to upload." in capsys.readouterr().out

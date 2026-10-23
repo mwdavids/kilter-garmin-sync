@@ -283,6 +283,8 @@ def _do_upload(args: argparse.Namespace, written_paths: list[Path]) -> None:
     for result in results:
         suffix = f" (activity {result.activity_id})" if result.activity_id else ""
         print(f"upload {result.status}: {result.path.name}{suffix}")
+        if result.reason:
+            print(f"upload {result.status}: {result.reason}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -314,6 +316,11 @@ def main(argv: list[str] | None = None) -> int:
     use_ledger = not args.no_ledger
     ledger_path = Path(args.ledger)
     ledger = Ledger.load(ledger_path) if use_ledger else None
+    upload_ledger = None
+    if args.upload:
+        from .garmin_upload import UploadLedger
+
+        upload_ledger = UploadLedger.load(Path(args.upload_ledger))
 
     written = skipped = 0
     written_paths: list[Path] = []
@@ -334,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if not args.overwrite:
             status = ledger.status(day_key, fingerprint) if ledger else "new"
-            if status == "unchanged":
+            needs_upload = upload_ledger is not None and not upload_ledger.contains(target.name)
+            if status == "unchanged" and not needs_upload:
                 skipped += 1
                 if args.verbose:
                     print(f"skip (already exported): {target}", file=sys.stderr)
@@ -346,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 continue
-            if status == "new" and target.exists():
+            if status == "new" and target.exists() and not needs_upload:
                 skipped += 1
                 if args.verbose:
                     print(f"skip (exists): {target}", file=sys.stderr)

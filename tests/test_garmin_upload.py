@@ -145,6 +145,7 @@ def test_upload_file_429_pending_after_max_retries(tmp_path):
     assert result.status == "pending"
     assert result.ok is False
     assert client.upload_calls == 4  # initial try + 3 retries
+    assert "HTTP 429 after 4 upload attempts" in result.reason
 
 
 def test_upload_file_duplicate_via_response(tmp_path):
@@ -205,6 +206,7 @@ def test_upload_file_async_pending_when_no_activity(tmp_path):
     )
     assert result.status == "pending"
     assert result.ok is False
+    assert "queued" in result.reason
 
 
 def test_pending_upload_not_recorded_in_ledger(tmp_path):
@@ -351,4 +353,3 @@ def test_patch_noop_without_http_module():
 
     # A garth stand-in without an http.Client (as in the other fakes) is a no-op.
     assert patch_garth_mobile_headers(FakeGarth()) is False
-

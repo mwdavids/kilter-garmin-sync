@@ -171,6 +171,7 @@ class UploadResult:
     # ledger does not record it and the next run retries).
     status: str
     activity_id: int | None = None
+    reason: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -319,7 +320,14 @@ def upload_file(
                 return UploadResult(path, "duplicate")
             if _looks_like_rate_limit(exc):
                 if attempt >= max_retries:
-                    return UploadResult(path, "pending")
+                    return UploadResult(
+                        path,
+                        "pending",
+                        reason=(
+                            f"Garmin returned HTTP 429 after {attempt + 1} upload attempts; "
+                            "import was not confirmed. Retry later."
+                        ),
+                    )
                 delay = _retry_after_seconds(exc)
                 if delay is None:
                     delay = retry_backoff * (2**attempt)
@@ -340,7 +348,11 @@ def upload_file(
             clock=clock,
         )
         if activity_id is None:
-            return UploadResult(path, "pending")
+            return UploadResult(
+                path,
+                "pending",
+                reason="Garmin queued the file, but no new activity was confirmed before timeout.",
+            )
         return UploadResult(path, "uploaded", activity_id)
     return UploadResult(path, "uploaded")
 

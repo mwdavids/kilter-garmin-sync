@@ -41,6 +41,15 @@ retries it rather than silently dropping it. If neither a token nor
 email/password is available, `--upload` prints a clear message and the generated
 files are still written for manual import.
 
+With `--upload`, an unchanged session that was exported but has no successful
+upload record is regenerated and retried, including on a fresh CI runner where
+the original file is no longer present. Already-confirmed uploads remain
+skipped. Sessions changed since export still require `--overwrite`.
+
+`pending` can also mean Garmin returned HTTP 429 throughout the upload retries;
+it does **not** necessarily mean the file was queued by Garmin. The CLI prints
+the reason so throttling and an unconfirmed asynchronous import are distinguishable.
+
 ## Login rate-limits & the garth 429 header fix
 
 Two separate Garmin rate-limits are worth knowing about:
