@@ -71,3 +71,16 @@ def test_ledger_cache_key_is_stable_not_run_id():
     assert "github.run_id" not in key
     assert "kilter-ledger-" in key
     assert "kilter-ledger-" in cache["with"]["restore-keys"]
+
+
+def test_email_and_artifacts_survive_upload_failure():
+    steps = _load()["jobs"]["export"]["steps"]
+    by_name = {s.get("name"): s for s in steps}
+    mail = by_name["Email activity files"]
+    for name in ("Email activity files", "Upload activity files"):
+        assert "!cancelled()" in by_name[name]["if"]
+        assert "inputs.mode != 'diagnose'" in by_name[name]["if"]
+    assert "vars.EMAIL_ENABLED == 'true'" in mail["if"]
+    assert "hashFiles('out/*.fit', 'out/*.tcx')" in mail["if"]
+    assert mail["env"]["SMTP_PASSWORD"] == "${{ secrets.SMTP_PASSWORD }}"
+    assert mail["run"] == "python -m kilter_garmin_sync.email_delivery"
