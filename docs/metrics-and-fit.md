@@ -80,7 +80,9 @@ field number on the `split` message:
 | `status`              | 71 | `3` = climb completed (send), `2` = attempted |
 
 Each split also carries `253` (session start, FIT-epoch seconds) and a set of
-constant envelope fields copied from a real watch file. Unrated climbs still emit
+constant envelope fields copied from a real watch file. These raw fields are set
+as encoded values, even when a newer `fit-tool` profile names them, so timestamps
+are not converted from Unix milliseconds a second time. Unrated climbs still emit
 a split (so they count as a route) but carry no `climb_grade_value`. The
 `split_summary` records `num_splits` (route count) and the max grade. The tool
 deliberately does **not** emit field `73` (`climb_send`) — the watch never sets it

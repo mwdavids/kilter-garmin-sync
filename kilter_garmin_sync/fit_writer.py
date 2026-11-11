@@ -110,12 +110,15 @@ def _load_template() -> dict:
 
 
 def _raw(msg, field_id: int, base_type: BaseType, value) -> None:
-    """Append a raw FIT field (by global number) and set its value."""
-    msg.fields.append(
-        Field(field_id=field_id, name=f"field_{field_id}", base_type=base_type,
-              size=0, growable=True)
-    )
-    msg.get_field(field_id).set_value(0, value)
+    """Set an encoded FIT value without named-field scaling or epoch conversion."""
+    field = msg.get_field(field_id)
+    if field is None:
+        field = Field(
+            field_id=field_id, name=f"field_{field_id}", base_type=base_type,
+            size=0, growable=True,
+        )
+        msg.fields.append(field)
+    field.set_encoded_value(0, value)
 
 
 def _strip_empty(msg) -> None:

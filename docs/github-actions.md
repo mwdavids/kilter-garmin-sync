@@ -48,5 +48,49 @@ the `GARMIN_TOKEN` secret — no button-press needed.
   any true duplicate with HTTP 409, so a re-upload never creates a second
   activity even if the ledger is cold.
 
+## Email attachments for manual import
+
+GitHub's built-in workflow notification emails cannot be customized to attach
+files. The workflow can send a **separate email** through your own SMTP mail
+provider, containing the newly generated `.fit` files (or `.tcx` when selected).
+This is optional and disabled until configured.
+
+Under **Settings → Secrets and variables → Actions**, add these repository
+**secrets**:
+
+| Secret | Value |
+| --- | --- |
+| `SMTP_HOST` | Your provider's SMTP hostname |
+| `SMTP_USERNAME` | SMTP login username |
+| `SMTP_PASSWORD` | SMTP password or provider-issued app password |
+| `EMAIL_FROM` | Sender address authorized by your provider |
+| `EMAIL_TO` | Recipient email address |
+
+Add repository **variables**:
+
+| Variable | Value |
+| --- | --- |
+| `EMAIL_ENABLED` | `true` to enable sending; unset or `false` to disable |
+| `SMTP_PORT` | `465` (default, implicit TLS), or your provider's STARTTLS port (usually `587`) |
+
+For example, Gmail uses `smtp.gmail.com`, port `465`, your Gmail address as
+username and sender, and an **app password**, not your normal account password.
+App passwords require two-step verification and may be restricted by account
+policy. Never put passwords in the workflow or commit them.
+
+Email runs on both manual and scheduled exports when new files exist, **even if
+the Garmin upload step fails or remains pending**. No new files means no email;
+diagnostic runs do not send mail. The email includes a workflow link and does
+not claim the activity was imported into Garmin. Existing sessions skipped by
+the export ledger are not attached.
+
+Mail configuration/authentication/delivery errors fail the email step instead
+of reporting success. Check the run logs and download the `kilter-activities`
+artifact if mail delivery fails. Server acceptance does not guarantee inbox
+delivery; check spam filtering too. If export fails before producing a file
+(for example, on login or FIT encoding), there is no attachment to send; the
+normal GitHub failure notification still applies.
+
 Generated activity files and the Kilter database are produced only inside the
-runner and uploaded as an artifact — they are **not** committed to the repo.
+runner; activity files are uploaded as artifacts and optionally emailed. They
+are **not** committed to the repo.

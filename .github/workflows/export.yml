@@ -155,9 +155,20 @@ jobs:
           kilter-garmin-sync "${args[@]}" --verbose
 
       - name: Upload activity files
-        if: ${{ inputs.mode != 'diagnose' }}
+        if: ${{ !cancelled() && inputs.mode != 'diagnose' }}
         uses: actions/upload-artifact@v4
         with:
           name: kilter-activities
           path: out/**
           if-no-files-found: warn
+
+      - name: Email activity files
+        if: ${{ !cancelled() && inputs.mode != 'diagnose' && vars.EMAIL_ENABLED == 'true' && (hashFiles('out/*.fit', 'out/*.tcx') != '') }}
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || '465' }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python -m kilter_garmin_sync.email_delivery

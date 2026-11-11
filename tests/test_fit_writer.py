@@ -8,7 +8,7 @@ tests decode the file and assert the structure Garmin's importer needs: a Garmin
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from garmin_fit_sdk import Decoder, Stream
@@ -46,6 +46,44 @@ def test_fit_is_valid_and_parses_back():
     assert messages["file_id_mesgs"][0]["type"] == "activity"
     assert len(messages["session_mesgs"]) == 1
     assert len(messages["activity_mesgs"]) == 1
+
+
+@pytest.mark.parametrize("named_timestamps", [False, True])
+def test_fit_split_timestamps_use_session_start(monkeypatch, named_timestamps):
+    from fit_tool.profile.messages.event_message import EventMessage
+
+    from kilter_garmin_sync import fit_writer
+
+    if named_timestamps:
+        # Newer fit-tool profiles know these fields and convert set_value input
+        # from Unix milliseconds; older profiles require raw FIT seconds.
+        def with_timestamp(cls):
+            def create():
+                msg = cls()
+                if msg.get_field(253) is None:
+                    msg.fields.append(EventMessage().get_field(253))
+                return msg
+            return create
+
+        monkeypatch.setattr(
+            fit_writer, "SplitMessage", with_timestamp(fit_writer.SplitMessage)
+        )
+        monkeypatch.setattr(
+            fit_writer, "SplitSummaryMessage",
+            with_timestamp(fit_writer.SplitSummaryMessage),
+        )
+
+    start = datetime(2026, 11, 11, 2, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 11, 3, 0, tzinfo=timezone.utc)
+    data = build_fit_bytes(_session(start, end))
+    messages, errors = Decoder(Stream.from_byte_array(bytearray(data))).read(
+        convert_datetimes_to_dates=False
+    )
+    assert errors == []
+    epoch = datetime(1989, 12, 31, tzinfo=timezone.utc)
+    expected = int((start - epoch).total_seconds())
+    for msg in messages["split_mesgs"] + messages["split_summary_mesgs"]:
+        assert msg.get("timestamp", msg.get(253)) == expected
 
 
 def test_fit_identifies_as_garmin_enduro2():
